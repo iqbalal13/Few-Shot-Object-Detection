@@ -1,0 +1,9 @@
+BACKBONE = "resnet101"
+
+NUM_QUERIES = 100
+
+HIDDEN_DIM = 256
+
+NUM_CLASSES = 1
+
+DEVICE = "cuda"
