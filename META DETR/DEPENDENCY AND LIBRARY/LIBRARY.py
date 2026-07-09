@@ -1,3 +1,17 @@
-!pip install transformers timm pycocotools accelerate
+import torch
+import platform
 
-!pip install transformers pycocotools timm accelerate -q
+print("=" * 60)
+print("System Information")
+print("=" * 60)
+
+print(f"Python Version : {platform.python_version()}")
+print(f"PyTorch Version: {torch.__version__}")
+
+print("\nCUDA Available :", torch.cuda.is_available())
+
+if torch.cuda.is_available():
+    print("GPU Name       :", torch.cuda.get_device_name(0))
+    print("CUDA Version   :", torch.version.cuda)
+else:
+    print("GPU Not Found")
