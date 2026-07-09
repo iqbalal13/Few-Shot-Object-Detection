@@ -1,17 +1,17 @@
+# ==========================================================
+# STEP 1 : Import Libraries
+# ==========================================================
+
+import os
+import cv2
 import torch
-import platform
+import random
+import numpy as np
+import matplotlib.pyplot as plt
+
+from PIL import Image
+from tqdm import tqdm
 
 print("=" * 60)
-print("System Information")
+print("Libraries imported successfully")
 print("=" * 60)
-
-print(f"Python Version : {platform.python_version()}")
-print(f"PyTorch Version: {torch.__version__}")
-
-print("\nCUDA Available :", torch.cuda.is_available())
-
-if torch.cuda.is_available():
-    print("GPU Name       :", torch.cuda.get_device_name(0))
-    print("CUDA Version   :", torch.version.cuda)
-else:
-    print("GPU Not Found")
