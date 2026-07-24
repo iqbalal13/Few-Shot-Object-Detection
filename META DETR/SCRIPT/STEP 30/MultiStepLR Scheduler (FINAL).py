@@ -8,10 +8,10 @@ from torch.optim.lr_scheduler import MultiStepLR
 # Training Configuration
 # ----------------------------------------------------------
 
-NUM_EPOCHS = 50
+NUM_EPOCHS = 25
 
 # Learning rate will decrease at these epochs
-MILESTONES = [35, 45]
+MILESTONES = [18, 23]
 
 GAMMA = 0.1
 
