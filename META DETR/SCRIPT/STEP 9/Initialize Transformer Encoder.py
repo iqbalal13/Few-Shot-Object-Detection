@@ -1,31 +1,11 @@
 # ==========================================================
-# STEP 9 : Transformer Encoder
+# STEP 9 : Initialize Transformer Encoder
 # ==========================================================
 
-import torch.nn as nn
+transformer_encoder = TransformerEncoder(
+    hidden_dim=CONFIG["hidden_dim"],
+    num_heads=CONFIG["num_heads"],
+    num_layers=CONFIG["num_encoder_layers"]
+).to(CONFIG["device"])
 
-class TransformerEncoder(nn.Module):
-
-    def __init__(
-        self,
-        hidden_dim=CONFIG["hidden_dim"],
-        num_heads=8,
-        num_layers=6
-    ):
-
-        super().__init__()
-
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=hidden_dim,
-            nhead=num_heads,
-            batch_first=True
-        )
-
-        self.encoder = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=num_layers
-        )
-
-    def forward(self, x):
-
-        return self.encoder(x)
+print(transformer_encoder)
