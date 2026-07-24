@@ -1,4 +1,4 @@
-# ==========================================================
+## ==========================================================
 # STEP 9 : Transformer Encoder
 # ==========================================================
 
@@ -8,7 +8,7 @@ class TransformerEncoder(nn.Module):
 
     def __init__(
         self,
-        hidden_dim=2048,
+        hidden_dim=CONFIG["hidden_dim"],
         num_heads=8,
         num_layers=6
     ):
@@ -26,6 +26,9 @@ class TransformerEncoder(nn.Module):
             num_layers=num_layers
         )
 
+    def forward(self, x):
+
+        return self.encoder(x)
     def forward(self, x):
 
         return self.encoder(x)
