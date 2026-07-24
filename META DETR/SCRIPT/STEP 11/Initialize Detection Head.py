@@ -3,7 +3,7 @@
 # ==========================================================
 
 detection_head = DetectionHead(
-    hidden_dim=2048,
+    hidden_dim=CONFIG["hidden_dim"],
     num_classes=CONFIG["num_classes"]
 ).to(CONFIG["device"])
 
