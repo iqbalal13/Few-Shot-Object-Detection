@@ -1,4 +1,4 @@
- ==========================================================
+# ==========================================================
 # STEP 10 : Transformer Decoder
 # ==========================================================
 
@@ -9,7 +9,7 @@ class TransformerDecoder(nn.Module):
 
     def __init__(
         self,
-        hidden_dim=2048,
+        hidden_dim=CONFIG["hidden_dim"],
         num_heads=8,
         num_layers=6,
         num_queries=100
