@@ -8,7 +8,7 @@ class DetectionHead(nn.Module):
 
     def __init__(
         self,
-        hidden_dim=2048,
+        hidden_dim=CONFIG["hidden_dim"],
         num_classes=1
     ):
 
