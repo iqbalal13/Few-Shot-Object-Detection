@@ -1,5 +1,5 @@
 # ==========================================================
-# STEP 19 : COCO Episode Dataset
+# STEP 19 : COCO Episode Dataset (REVISED)
 # ==========================================================
 
 from torch.utils.data import Dataset
@@ -64,6 +64,12 @@ class COCOEpisodeDataset(Dataset):
 
         image = Image.open(image_path).convert("RGB")
 
+        # ==================================================
+        # Image Size (for box normalization)
+        # ==================================================
+        img_w = image_info["width"]
+        img_h = image_info["height"]
+
         ann_ids = self.coco.getAnnIds(imgIds=image_id)
         anns = self.coco.loadAnns(ann_ids)
 
@@ -74,8 +80,20 @@ class COCOEpisodeDataset(Dataset):
 
             x, y, w, h = ann["bbox"]
 
+            # ----------------------------------------------
+            # COCO xywh -> cxcywh
+            # ----------------------------------------------
             cx = x + (w / 2)
             cy = y + (h / 2)
+
+            # ----------------------------------------------
+            # Normalize to [0,1]
+            # Compatible with DetectionHead (Sigmoid)
+            # ----------------------------------------------
+            cx /= img_w
+            cy /= img_h
+            w /= img_w
+            h /= img_h
 
             boxes.append([cx, cy, w, h])
 
@@ -172,7 +190,6 @@ class COCOEpisodeDataset(Dataset):
             "query_target": query_target
 
         }
-
         }
 
         return image, target
