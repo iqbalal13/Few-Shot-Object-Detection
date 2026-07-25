@@ -37,30 +37,29 @@ class SimplifiedMetaDETR(nn.Module):
     ):
 
         # ==================================================
-        # Base Training Mode
-        # model(images)
+        # Episodic Forward
         # ==================================================
         if query_image is None:
             query_image = support_image
 
         # ==================================================
-        # Support Encoder
+        # Support Branch
         # ==================================================
         prototype = self.support_encoder(
             support_image
         )
 
         # ==================================================
-        # Query Encoder
+        # Query Branch
         # ==================================================
         query_feature = self.query_encoder(
             query_image
         )
 
         # ==================================================
-        # Prototype Cross Attention
+        # Prototype-guided Cross Attention
         # ==================================================
-        attended = self.cross_attention(
+        guided_query = self.cross_attention(
             prototype,
             query_feature
         )
@@ -69,7 +68,7 @@ class SimplifiedMetaDETR(nn.Module):
         # Transformer Encoder
         # ==================================================
         encoder_output = self.transformer_encoder(
-            attended
+            guided_query
         )
 
         # ==================================================
