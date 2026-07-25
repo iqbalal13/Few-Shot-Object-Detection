@@ -1,12 +1,23 @@
 # ==========================================================
-# STEP 23 : Test COCO DataLoader
+# STEP 23 : Test COCO Episodic DataLoader
 # ==========================================================
 
-images, targets = next(iter(train_loader))
+batch = next(iter(train_loader))
+
+support_images = batch["support_images"]
+support_targets = batch["support_targets"]
+
+query_images = batch["query_images"]
+query_targets = batch["query_targets"]
 
 print("=" * 60)
-print("Batch Size :", len(images))
-print("Image Shape :", images[0].shape)
-print("Boxes in First Image :", len(targets[0]["boxes"]))
-print("Labels in First Image :", len(targets[0]["labels"]))
+print("Batch Size :", len(support_images))
+print("-" * 60)
+print("Support Image Shape :", support_images[0].shape)
+print("Support Boxes       :", len(support_targets[0]["boxes"]))
+print("Support Labels      :", len(support_targets[0]["labels"]))
+print("-" * 60)
+print("Query Image Shape   :", query_images[0].shape)
+print("Query Boxes         :", len(query_targets[0]["boxes"]))
+print("Query Labels        :", len(query_targets[0]["labels"]))
 print("=" * 60)
