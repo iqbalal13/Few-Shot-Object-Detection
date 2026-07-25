@@ -1,5 +1,5 @@
 # ==========================================================
-# STEP 31 : Base Training on MS COCO
+# STEP 31 : Base Training on MS COCO (Smoke Test)
 # ==========================================================
 
 from tqdm import tqdm
@@ -8,12 +8,12 @@ import torch
 # ----------------------------------------------------------
 # Training Configuration
 # ----------------------------------------------------------
-MAX_STEPS_PER_EPOCH = 800
+MAX_STEPS_PER_EPOCH = 2
 
 model = model.to(CONFIG["device"])
 
 print("=" * 60)
-print("Start Base Training")
+print("Start Episodic Base Training (Smoke Test)")
 print("=" * 60)
 print(f"Epochs           : {NUM_EPOCHS}")
 print(f"Batch Size       : {COCO_CONFIG['batch_size']}")
@@ -33,7 +33,7 @@ for epoch in range(NUM_EPOCHS):
 
     actual_steps = 0
 
-    for step, (images, targets) in enumerate(progress_bar):
+    for step, batch in enumerate(progress_bar):
 
         # --------------------------------------------------
         # Stop after MAX_STEPS_PER_EPOCH
@@ -42,18 +42,27 @@ for epoch in range(NUM_EPOCHS):
             break
 
         # --------------------------------------------------
-        # Images
+        # Support Images
         # --------------------------------------------------
-        images = torch.stack(images).to(CONFIG["device"])
+        support_images = torch.stack(
+            batch["support_images"]
+        ).to(CONFIG["device"])
 
         # --------------------------------------------------
-        # Targets
+        # Query Images
         # --------------------------------------------------
-        new_targets = []
+        query_images = torch.stack(
+            batch["query_images"]
+        ).to(CONFIG["device"])
 
-        for target in targets:
+        # --------------------------------------------------
+        # Query Targets
+        # --------------------------------------------------
+        query_targets = []
 
-            new_targets.append({
+        for target in batch["query_targets"]:
+
+            query_targets.append({
 
                 "boxes": target["boxes"].to(CONFIG["device"]),
 
@@ -64,7 +73,12 @@ for epoch in range(NUM_EPOCHS):
         # --------------------------------------------------
         # Forward
         # --------------------------------------------------
-        class_logits, pred_boxes = model(images)
+        class_logits, pred_boxes = model(
+
+            support_images,
+            query_images
+
+        )
 
         outputs = {
 
@@ -77,12 +91,19 @@ for epoch in range(NUM_EPOCHS):
         # --------------------------------------------------
         # Loss
         # --------------------------------------------------
-        loss_dict = criterion(outputs, new_targets)
+        loss_dict = criterion(
+            outputs,
+            query_targets
+        )
 
         total_loss = (
+
             loss_dict["loss_ce"]
+
             + loss_dict["loss_bbox"]
+
             + loss_dict["loss_giou"]
+
         )
 
         # --------------------------------------------------
@@ -93,8 +114,11 @@ for epoch in range(NUM_EPOCHS):
         total_loss.backward()
 
         torch.nn.utils.clip_grad_norm_(
+
             model.parameters(),
+
             max_norm=0.1
+
         )
 
         optimizer.step()
@@ -118,13 +142,13 @@ for epoch in range(NUM_EPOCHS):
     epoch_loss = running_loss / actual_steps
 
     print(
+
         f"Epoch {epoch+1}/{NUM_EPOCHS}"
         f" | Steps : {actual_steps}"
         f" | Average Loss : {epoch_loss:.4f}"
+
     )
 
 print("=" * 60)
-print("Base Training Finished")
-print("=" * 60)
-print("Base Training Finished")
+print("Smoke Test Finished")
 print("=" * 60)
