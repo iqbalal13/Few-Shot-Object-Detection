@@ -1,5 +1,5 @@
 # ==========================================================
-# STEP 22 : Create COCO DataLoader
+# STEP 22 : Create COCO Episodic DataLoader
 # ==========================================================
 
 from torch.utils.data import DataLoader
@@ -14,6 +14,6 @@ train_loader = DataLoader(
 )
 
 print("=" * 60)
-print("COCO DataLoader Ready")
-print("Number of Batches :", len(train_loader))
+print("COCO Episodic DataLoader Ready")
+print("Number of Episodes (Batches) :", len(train_loader))
 print("=" * 60)
