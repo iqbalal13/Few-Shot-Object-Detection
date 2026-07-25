@@ -18,25 +18,37 @@ class PrototypeCrossAttention(nn.Module):
 
     def forward(self, prototype, query_feature):
 
-        # query_feature :
-        # [B,256,H,W]
-
+        # ---------------------------------------------
+        # query_feature
+        # Shape : [B,256,H,W]
+        # ---------------------------------------------
         B, C, H, W = query_feature.shape
 
-        # menjadi
-        # [B,H*W,256]
+        # ---------------------------------------------
+        # Flatten menjadi token
+        # [B,256,H,W] -> [B,H*W,256]
+        # ---------------------------------------------
+        query = query_feature.flatten(2).permute(0, 2, 1)
 
-        query = query_feature.flatten(2).permute(0,2,1)
-
-        # prototype
-        # [B,256]
-
+        # ---------------------------------------------
+        # Prototype
+        # [B,256] -> [B,1,256]
+        # ---------------------------------------------
         prototype = prototype.unsqueeze(1)
 
+        # ---------------------------------------------
+        # Prototype-guided Cross Attention
+        # ---------------------------------------------
         attended, _ = self.attention(
             query=query,
             key=prototype,
             value=prototype
         )
 
-        return attended
+        # ---------------------------------------------
+        # Residual Connection
+        # Mempertahankan informasi query asli
+        # ---------------------------------------------
+        output = query + attended
+
+        return output
