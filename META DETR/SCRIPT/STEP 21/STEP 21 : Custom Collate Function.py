@@ -1,17 +1,43 @@
 # ==========================================================
-# STEP 21 : Custom Collate Function
+# STEP 21 : Episodic Collate Function
 # ==========================================================
 
 def collate_fn(batch):
-    images = []
-    targets = []
 
-    for image, target in batch:
-        images.append(image)
-        targets.append(target)
+    support_images = []
+    support_targets = []
 
-    return images, targets
+    query_images = []
+    query_targets = []
+
+    for episode in batch:
+
+        support_images.append(
+            episode["support_image"]
+        )
+
+        support_targets.append(
+            episode["support_target"]
+        )
+
+        query_images.append(
+            episode["query_image"]
+        )
+
+        query_targets.append(
+            episode["query_target"]
+        )
+
+    return {
+
+        "support_images": support_images,
+        "support_targets": support_targets,
+
+        "query_images": query_images,
+        "query_targets": query_targets
+
+    }
 
 print("=" * 60)
-print("Custom Collate Function Ready")
+print("Custom Episodic Collate Function Ready")
 print("=" * 60)
