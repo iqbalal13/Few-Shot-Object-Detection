@@ -217,7 +217,3 @@ print("=" * 70)
 # support_dataset
 # query_dataset
 # support_mapping
-
-print("=" * 60)
-print("STEP 38 Finished")
-print("=" * 60)
