@@ -13,93 +13,92 @@ print("=" * 70)
 # ----------------------------------------------------------
 
 SUPPORT_BATCH_SIZE = 1
-
 QUERY_BATCH_SIZE = CONFIG["batch_size"]
 
 # ----------------------------------------------------------
-# Support Loader
+# Build Support DataLoader
 # ----------------------------------------------------------
 
 support_loader = DataLoader(
-
     support_dataset,
-
     batch_size=SUPPORT_BATCH_SIZE,
-
     shuffle=True,
-
+    num_workers=CONFIG["num_workers"],
     collate_fn=collate_fn,
-
-    num_workers=CONFIG["num_workers"]
-
+    pin_memory=True
 )
 
 # ----------------------------------------------------------
-# Query Loader
+# Build Query DataLoader
 # ----------------------------------------------------------
 
 query_loader = DataLoader(
-
     query_dataset,
-
     batch_size=QUERY_BATCH_SIZE,
-
     shuffle=True,
-
+    num_workers=CONFIG["num_workers"],
     collate_fn=collate_fn,
-
-    num_workers=CONFIG["num_workers"]
-
+    pin_memory=True
 )
 
 # ----------------------------------------------------------
-# Validation
+# Dataset Statistics
 # ----------------------------------------------------------
 
-print("\nSupport Loader")
+print("\nSupport Dataset")
+print("-" * 40)
+print(f"Images      : {len(support_dataset)}")
+print(f"Batch Size  : {SUPPORT_BATCH_SIZE}")
+print(f"Batches     : {len(support_loader)}")
 
-print(f"Batch Size : {SUPPORT_BATCH_SIZE}")
-
-print(f"Images     : {len(support_dataset)}")
-
-print(f"Batches    : {len(support_loader)}")
-
-print("\nQuery Loader")
-
-print(f"Batch Size : {QUERY_BATCH_SIZE}")
-
-print(f"Images     : {len(query_dataset)}")
-
-print(f"Batches    : {len(query_loader)}")
+print("\nQuery Dataset")
+print("-" * 40)
+print(f"Images      : {len(query_dataset)}")
+print(f"Batch Size  : {QUERY_BATCH_SIZE}")
+print(f"Batches     : {len(query_loader)}")
 
 # ----------------------------------------------------------
 # Sanity Check
 # ----------------------------------------------------------
 
-print("\nRunning DataLoader Sanity Check...\n")
+print("\nRunning DataLoader Sanity Check...")
 
 support_images, support_targets = next(iter(support_loader))
-
 query_images, query_targets = next(iter(query_loader))
 
-print("Support Batch")
+print("\nSupport Batch")
+print("-" * 40)
+print(f"Images   : {len(support_images)}")
+print(f"Targets  : {len(support_targets)}")
 
-print(f"Images : {len(support_images)}")
+for i, target in enumerate(support_targets):
+    print(f" Support[{i}] Labels : {target['labels'].tolist()}")
 
-print(f"Targets: {len(support_targets)}")
+print("\nQuery Batch")
+print("-" * 40)
+print(f"Images   : {len(query_images)}")
+print(f"Targets  : {len(query_targets)}")
 
-print()
+for i, target in enumerate(query_targets):
+    print(f" Query[{i}] Labels : {target['labels'].tolist()}")
 
-print("Query Batch")
+# ----------------------------------------------------------
+# Validation
+# ----------------------------------------------------------
 
-print(f"Images : {len(query_images)}")
+assert len(support_loader) > 0, "Support loader kosong."
+assert len(query_loader) > 0, "Query loader kosong."
 
-print(f"Targets: {len(query_targets)}")
-
-print()
+print("\nValidation Passed")
+print("Support Loader Ready")
+print("Query Loader Ready")
 
 print("=" * 70)
-
 print("STEP 39 COMPLETED")
-
 print("=" * 70)
+
+# ----------------------------------------------------------
+# Output
+# ----------------------------------------------------------
+# support_loader
+# query_loader
