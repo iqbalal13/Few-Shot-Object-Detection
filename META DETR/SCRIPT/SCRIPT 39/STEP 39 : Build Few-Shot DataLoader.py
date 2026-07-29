@@ -1,5 +1,5 @@
 # ==========================================================
-# STEP 39 : Build Few-Shot DataLoader
+# STEP 39 : BUILD FEW-SHOT DATALOADER
 # ==========================================================
 
 from torch.utils.data import DataLoader
@@ -9,11 +9,15 @@ print("STEP 39 : BUILD FEW-SHOT DATALOADER")
 print("=" * 70)
 
 # ----------------------------------------------------------
-# Configuration
+# Update Configuration
 # ----------------------------------------------------------
 
-SUPPORT_BATCH_SIZE = 1
-QUERY_BATCH_SIZE = CONFIG["batch_size"]
+FSOD_CONFIG.update({
+    "support_batch_size": 1,
+    "query_batch_size": 2,
+    "num_workers": 0,
+    "pin_memory": True
+})
 
 # ----------------------------------------------------------
 # Build Support DataLoader
@@ -21,11 +25,12 @@ QUERY_BATCH_SIZE = CONFIG["batch_size"]
 
 support_loader = DataLoader(
     support_dataset,
-    batch_size=SUPPORT_BATCH_SIZE,
+    batch_size=FSOD_CONFIG["support_batch_size"],
     shuffle=True,
-    num_workers=CONFIG["num_workers"],
     collate_fn=collate_fn,
-    pin_memory=True
+    num_workers=FSOD_CONFIG["num_workers"],
+    pin_memory=FSOD_CONFIG["pin_memory"],
+    drop_last=False
 )
 
 # ----------------------------------------------------------
@@ -34,70 +39,80 @@ support_loader = DataLoader(
 
 query_loader = DataLoader(
     query_dataset,
-    batch_size=QUERY_BATCH_SIZE,
+    batch_size=FSOD_CONFIG["query_batch_size"],
     shuffle=True,
-    num_workers=CONFIG["num_workers"],
     collate_fn=collate_fn,
-    pin_memory=True
+    num_workers=FSOD_CONFIG["num_workers"],
+    pin_memory=FSOD_CONFIG["pin_memory"],
+    drop_last=False
 )
 
 # ----------------------------------------------------------
-# Dataset Statistics
+# DataLoader Information
 # ----------------------------------------------------------
+
+print("\nConfiguration")
+print("-" * 40)
+
+for k, v in FSOD_CONFIG.items():
+    print(f"{k:20s}: {v}")
 
 print("\nSupport Dataset")
 print("-" * 40)
-print(f"Images      : {len(support_dataset)}")
-print(f"Batch Size  : {SUPPORT_BATCH_SIZE}")
-print(f"Batches     : {len(support_loader)}")
+print(f"Images        : {len(support_dataset)}")
+print(f"Batch Size    : {FSOD_CONFIG['support_batch_size']}")
+print(f"Total Batches : {len(support_loader)}")
 
 print("\nQuery Dataset")
 print("-" * 40)
-print(f"Images      : {len(query_dataset)}")
-print(f"Batch Size  : {QUERY_BATCH_SIZE}")
-print(f"Batches     : {len(query_loader)}")
+print(f"Images        : {len(query_dataset)}")
+print(f"Batch Size    : {FSOD_CONFIG['query_batch_size']}")
+print(f"Total Batches : {len(query_loader)}")
+
+# ----------------------------------------------------------
+# Validation
+# ----------------------------------------------------------
+
+assert len(support_loader) > 0, "Support DataLoader kosong."
+assert len(query_loader) > 0, "Query DataLoader kosong."
 
 # ----------------------------------------------------------
 # Sanity Check
 # ----------------------------------------------------------
 
 print("\nRunning DataLoader Sanity Check...")
+print("-" * 40)
 
 support_images, support_targets = next(iter(support_loader))
 query_images, query_targets = next(iter(query_loader))
 
 print("\nSupport Batch")
-print("-" * 40)
-print(f"Images   : {len(support_images)}")
-print(f"Targets  : {len(support_targets)}")
-
-for i, target in enumerate(support_targets):
-    print(f" Support[{i}] Labels : {target['labels'].tolist()}")
+print(f"Images  : {len(support_images)}")
+print(f"Targets : {len(support_targets)}")
 
 print("\nQuery Batch")
+print(f"Images  : {len(query_images)}")
+print(f"Targets : {len(query_targets)}")
+
+# ----------------------------------------------------------
+# Tensor Shape Check
+# ----------------------------------------------------------
+
+print("\nTensor Shape")
 print("-" * 40)
-print(f"Images   : {len(query_images)}")
-print(f"Targets  : {len(query_targets)}")
 
-for i, target in enumerate(query_targets):
-    print(f" Query[{i}] Labels : {target['labels'].tolist()}")
+print(f"Support Image Shape : {support_images[0].shape}")
+print(f"Query Image Shape   : {query_images[0].shape}")
 
-# ----------------------------------------------------------
-# Validation
-# ----------------------------------------------------------
+if len(support_targets) > 0:
+    print(f"Support Labels      : {support_targets[0]['labels'].shape}")
 
-assert len(support_loader) > 0, "Support loader kosong."
-assert len(query_loader) > 0, "Query loader kosong."
+if len(query_targets) > 0:
+    print(f"Query Labels        : {query_targets[0]['labels'].shape}")
 
-print("\nValidation Passed")
-print("Support Loader Ready")
-print("Query Loader Ready")
-
-print("=" * 70)
+print("\n" + "=" * 70)
 print("STEP 39 COMPLETED")
 print("=" * 70)
-
-# ----------------------------------------------------------
 # Output
 # ----------------------------------------------------------
 # support_loader
