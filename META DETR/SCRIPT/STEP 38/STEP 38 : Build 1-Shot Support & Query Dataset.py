@@ -1,8 +1,10 @@
 # ==========================================================
-# STEP 38 : Build 1-Shot Support & Query Dataset
+# STEP 38 : BUILD 1-SHOT SUPPORT & QUERY DATASET
 # ==========================================================
 
 import random
+import numpy as np
+import torch
 from collections import defaultdict
 from torch.utils.data import Subset
 
@@ -11,13 +13,25 @@ print("STEP 38 : BUILD 1-SHOT SUPPORT & QUERY DATASET")
 print("=" * 70)
 
 # ----------------------------------------------------------
-# Configuration
+# FSOD Configuration
 # ----------------------------------------------------------
 
-SEED = 42
-NUM_SHOTS = 1
+FSOD_CONFIG = {
+    "seed": 42,
+    "num_shots": 1
+}
 
-random.seed(SEED)
+random.seed(FSOD_CONFIG["seed"])
+np.random.seed(FSOD_CONFIG["seed"])
+torch.manual_seed(FSOD_CONFIG["seed"])
+
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(FSOD_CONFIG["seed"])
+
+print("\nFSOD Configuration")
+print("-" * 40)
+for k, v in FSOD_CONFIG.items():
+    print(f"{k:15s}: {v}")
 
 # ----------------------------------------------------------
 # Build Class -> Image Index Mapping
@@ -34,7 +48,7 @@ for idx in range(len(cctv_train_dataset)):
     for cls in set(labels):
         class_to_indices[cls].append(idx)
 
-print(f"\nDetected {len(class_to_indices)} Classes")
+print(f"\nDetected Classes : {len(class_to_indices)}")
 
 # ----------------------------------------------------------
 # Select Support Images
@@ -54,7 +68,7 @@ for cls in sorted(class_to_indices.keys()):
 
     chosen = []
 
-    # Prioritaskan image yang belum pernah dipakai
+    # Prioritize unique images
     for idx in candidates:
 
         if idx not in used_images:
@@ -62,12 +76,11 @@ for cls in sorted(class_to_indices.keys()):
             chosen.append(idx)
             used_images.add(idx)
 
-        if len(chosen) == NUM_SHOTS:
+        if len(chosen) == FSOD_CONFIG["num_shots"]:
             break
 
-    # Jika jumlah image unik kurang,
-    # gunakan image yang tersisa (fallback)
-    if len(chosen) < NUM_SHOTS:
+    # Fallback if unique images are insufficient
+    if len(chosen) < FSOD_CONFIG["num_shots"]:
 
         remaining = [
 
@@ -79,7 +92,7 @@ for cls in sorted(class_to_indices.keys()):
 
         ]
 
-        need = NUM_SHOTS - len(chosen)
+        need = FSOD_CONFIG["num_shots"] - len(chosen)
 
         if len(remaining) < need:
 
@@ -119,43 +132,36 @@ query_indices = [
 assert len(set(support_indices)) == len(support_indices)
 
 assert len(
-
     set(support_indices)
-
     &
-
     set(query_indices)
-
 ) == 0
 
 assert (
-
     len(support_indices)
-
     +
-
     len(query_indices)
-
 ) == len(cctv_train_dataset)
+
+expected_support = (
+    len(class_to_indices)
+    * FSOD_CONFIG["num_shots"]
+)
+
+assert len(support_indices) == expected_support
 
 # ----------------------------------------------------------
 # Build Dataset
 # ----------------------------------------------------------
 
 support_dataset = Subset(
-
     cctv_train_dataset,
-
     support_indices
-
 )
 
 query_dataset = Subset(
-
     cctv_train_dataset,
-
     query_indices
-
 )
 
 # ----------------------------------------------------------
@@ -166,11 +172,21 @@ print("\n" + "=" * 70)
 print("Few-Shot Sampling Summary")
 print("=" * 70)
 
-print(f"Random Seed        : {SEED}")
-print(f"Shots per Class    : {NUM_SHOTS}")
-print(f"Number of Classes  : {len(class_to_indices)}")
-print(f"Support Images     : {len(support_dataset)}")
-print(f"Query Images       : {len(query_dataset)}")
+print(f"Random Seed       : {FSOD_CONFIG['seed']}")
+print(f"Shots per Class   : {FSOD_CONFIG['num_shots']}")
+print(f"Detected Classes  : {len(class_to_indices)}")
+print(f"Support Images    : {len(support_dataset)}")
+print(f"Query Images      : {len(query_dataset)}")
+
+print(
+    f"Support Ratio     : "
+    f"{len(support_dataset)/len(cctv_train_dataset):.2%}"
+)
+
+print(
+    f"Query Ratio       : "
+    f"{len(query_dataset)/len(cctv_train_dataset):.2%}"
+)
 
 print("=" * 70)
 
