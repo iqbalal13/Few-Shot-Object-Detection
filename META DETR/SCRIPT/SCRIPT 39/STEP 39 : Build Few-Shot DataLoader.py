@@ -113,7 +113,3 @@ if len(query_targets) > 0:
 print("\n" + "=" * 70)
 print("STEP 39 COMPLETED")
 print("=" * 70)
-# Output
-# ----------------------------------------------------------
-# support_loader
-# query_loader
