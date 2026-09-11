@@ -1,197 +1,119 @@
 # ==========================================================
-# STEP 17 : Episodic Dataset & Sampling Sanity
+# STEP 17: Person Dataset Sanity and Visual Check
 # ==========================================================
 
-assert "train_dataset" in globals(), (
-    "Run STEP 16 first."
-)
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
 
 
 train_dataset.set_epoch(0)
 
-
-# ==========================================================
-# BALANCED 80-CLASS CYCLE
-# ==========================================================
-
-first_cycle_classes = [
-
-    int(
-        train_dataset[i][
-            "episode_class"
-        ].item()
-    )
-
-    for i in range(80)
-]
-
-
-assert (
-    len(
-        set(
-            first_cycle_classes
-        )
-    )
-    ==
-    80
-), (
-    "First 80 episodes must cover "
-    "all 80 COCO classes."
-)
-
-
-# ==========================================================
-# EPISODE SANITY
-# ==========================================================
-
-print("=" * 70)
-print("STEP 17 : EPISODIC SAMPLING SANITY")
-print("=" * 70)
-
-
-for i in range(5):
-
+for i in range(10):
     episode = train_dataset[i]
+    target = episode["query_target"]
 
-
-    episode_class = int(
-
-        episode[
-            "episode_class"
-        ].item()
-    )
-
-
-    support_image = (
-        episode[
-            "support_image"
-        ]
-    )
-
-    query_image = (
-        episode[
-            "query_image"
-        ]
-    )
-
-    support_target = (
-        episode[
-            "support_target"
-        ]
-    )
-
-    query_target = (
-        episode[
-            "query_target"
-        ]
-    )
-
+    assert episode["episode_class"].item() == 0
 
     assert (
-        support_image.shape
-        ==
-        (
-            3,
-            CONFIG["image_size"],
-            CONFIG["image_size"]
-        )
-    )
+        target["labels"] == 0
+    ).all()
 
+    assert len(target["boxes"]) > 0
 
     assert (
-        query_image.shape
-        ==
-        (
-            3,
-            CONFIG["image_size"],
-            CONFIG["image_size"]
-        )
+        episode["support_target"]["image_id"].item()
+        != target["image_id"].item()
     )
 
+    boxes = target["boxes"]
+
+    assert torch.isfinite(boxes).all()
 
     assert (
-        support_target[
-            "labels"
-        ].numel()
-        ==
-        1
-    )
-
+        boxes[:, 2:] > 0
+    ).all()
 
     assert (
-        support_target[
-            "labels"
-        ][0].item()
-        ==
-        episode_class
-    )
-
+        boxes[:, :2] - boxes[:, 2:] / 2 >= -1e-6
+    ).all()
 
     assert (
-
-        query_target[
-            "labels"
-        ]
-        ==
-        episode_class
-
+        boxes[:, :2] + boxes[:, 2:] / 2 <= 1 + 1e-6
     ).all()
 
 
-    assert (
-        support_target[
-            "image_id"
-        ].item()
-        !=
-        query_target[
-            "image_id"
-        ].item()
+def display_tensor_image(tensor):
+    array = (
+        tensor
+        .detach()
+        .cpu()
+        .permute(1, 2, 0)
+        .numpy()
     )
 
-
-    boxes = (
-        query_target[
-            "boxes"
-        ]
+    array = (
+        array * np.array(IMAGENET_STD)
+        + np.array(IMAGENET_MEAN)
     )
 
-
-    assert (
-        boxes.ndim == 2
-        and
-        boxes.shape[-1] == 4
-    )
+    return np.clip(array, 0, 1)
 
 
-    assert torch.all(
-        boxes >= 0.0
-    )
+episode = train_dataset[0]
 
-    assert torch.all(
-        boxes <= 1.0
-    )
-
-    assert torch.all(
-        boxes[:, 2:] > 0.0
-    )
-
-
-    print(
-
-        f"Episode {i+1} | "
-        f"Class={episode_class:2d} "
-        f"({CATEGORY_NAMES[episode_class]}) | "
-        f"GT={len(boxes)}"
-    )
-
-
-print("-" * 70)
-
-print(
-    "First 80 episodes : "
-    "✓ exactly 80 unique COCO classes"
+fig, axes = plt.subplots(
+    1,
+    2,
+    figsize=(12, 6)
 )
 
-print("=" * 70)
-print("✓ STEP 17 PASSED")
-print("=" * 70)
+axes[0].imshow(
+    display_tensor_image(
+        episode["support_image"]
+    )
+)
+
+axes[0].set_title(
+    "Support crop: person"
+)
+
+axes[1].imshow(
+    display_tensor_image(
+        episode["query_image"]
+    )
+)
+
+height, width = episode[
+    "query_image"
+].shape[-2:]
+
+for cx, cy, w, h in episode[
+    "query_target"
+]["boxes"].tolist():
+    axes[1].add_patch(
+        Rectangle(
+            (
+                (cx - w / 2) * width,
+                (cy - h / 2) * height
+            ),
+            w * width,
+            h * height,
+            fill=False,
+            edgecolor="lime",
+            linewidth=2,
+        )
+    )
+
+axes[1].set_title(
+    "Different query image: all eligible person GT"
+)
+
+for axis in axes:
+    axis.axis("off")
+
+plt.tight_layout()
+plt.show()
+plt.close(fig)
+
+print("STEP 17 PASS: person-only targets.")
+print("Inspect displayed boxes before training.")
