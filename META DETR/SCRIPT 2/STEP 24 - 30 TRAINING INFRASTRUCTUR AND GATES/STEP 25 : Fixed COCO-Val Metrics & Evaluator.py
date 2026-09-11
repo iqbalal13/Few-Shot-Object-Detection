@@ -1,1408 +1,530 @@
 # ==========================================================
-# STEP 25 : Fixed COCO-Val Metrics & Evaluator
-# CLASS-AWARE EPISODIC EVALUATION
+# STEP 25: Person AP50 and Evaluation
 #
-# IMPORTANT FIX:
+# Satu definisi AP dipakai pada seluruh diagnosis.
+# AP: menggunakan semua skor.
+# Precision/recall: menggunakan score threshold.
 #
-# OLD:
-#   all episodic predictions from all 80 COCO classes
-#   -> one global binary AP
-#
-# NEW:
-#   class 0 episodes -> AP50_0
-#   class 1 episodes -> AP50_1
-#   ...
-#   class 79 episodes -> AP50_79
-#
-#   mAP50 = mean(AP50 over classes PRESENT in evaluation)
-#
-# For full fixed COCO-Val:
-#   800 episodes = 10 episodes × 80 classes
-#   => mean over all 80 classes
-#
-# For tiny subsets:
-#   mean only over classes actually present
-#
-# P/R remain MICRO across all evaluated episodes.
+# Ini custom episodic AP, bukan official COCOeval.
 # ==========================================================
 
-import numpy as np
-import torch
-
-from collections import defaultdict
-from tqdm.auto import tqdm
+from scipy.optimize import linear_sum_assignment
 
 
-assert "val_loader" in globals(), (
-    "Run STEP 18 first."
-)
+def as_numpy(value):
+    if hasattr(value, "detach"):
+        value = (
+            value
+            .detach()
+            .cpu()
+            .numpy()
+        )
 
-assert "box_iou" in globals(), (
-    "Run STEP 19 first."
-)
-
-assert "box_cxcywh_to_xyxy" in globals(), (
-    "Run STEP 19 first."
-)
+    return np.asarray(
+        value,
+        dtype=np.float64
+    )
 
 
-# ==========================================================
-# SINGLE SEMANTIC CLASS AP50
-#
-# prediction_records:
-# [
-#     {
-#         "episode_id": int,
-#         "score": float,
-#         "box": Tensor[4]
-#     },
-#     ...
-# ]
-#
-# episode_gt_boxes:
-# {
-#     episode_id: Tensor[N,4]
-# }
-# ==========================================================
-
-def compute_single_class_ap50(
-    prediction_records,
-    episode_gt_boxes,
-    total_gt,
-    iou_threshold=0.50
+def numpy_box_iou(
+    boxes_a,
+    boxes_b,
 ):
-
-    if total_gt <= 0:
-
-        return 0.0
-
-
-    if len(prediction_records) == 0:
-
-        return 0.0
-
-
-    # ------------------------------------------------------
-    # Rank predictions ONLY WITHIN THIS semantic class.
-    # ------------------------------------------------------
-
-    prediction_records = sorted(
-
-        prediction_records,
-
-        key=lambda record:
-            record["score"],
-
-        reverse=True
-    )
-
-
-    matched_gt = {
-
-        episode_id:
-            set()
-
-        for episode_id
-        in episode_gt_boxes.keys()
-    }
-
-
-    tp = []
-    fp = []
-
-
-    for record in prediction_records:
-
-        episode_id = int(
-            record["episode_id"]
-        )
-
-
-        pred_box = (
-
-            record["box"]
-
-            .unsqueeze(0)
-        )
-
-
-        gt_boxes = (
-            episode_gt_boxes[
-                episode_id
-            ]
-        )
-
-
-        # --------------------------------------------------
-        # No GT for this episode/class.
-        # Normally impossible in our episodic dataset,
-        # but remain defensive.
-        # --------------------------------------------------
-
-        if len(gt_boxes) == 0:
-
-            tp.append(0.0)
-            fp.append(1.0)
-
-            continue
-
-
-        pred_xyxy = (
-            box_cxcywh_to_xyxy(
-                pred_box
-            )
-        )
-
-
-        gt_xyxy = (
-            box_cxcywh_to_xyxy(
-                gt_boxes
-            )
-        )
-
-
-        ious, _ = box_iou(
-
-            pred_xyxy,
-
-            gt_xyxy
-        )
-
-
-        # Highest-IoU GT first.
-
-        candidate_order = torch.argsort(
-
-            ious[0],
-
-            descending=True
-        )
-
-
-        matched = False
-
-
-        for gt_idx in candidate_order:
-
-            gt_idx_int = int(
-                gt_idx.item()
-            )
-
-
-            if (
-                gt_idx_int
-                in matched_gt[
-                    episode_id
-                ]
-            ):
-
-                continue
-
-
-            if (
-                ious[
-                    0,
-                    gt_idx_int
-                ].item()
-                >=
-                iou_threshold
-            ):
-
-                matched_gt[
-                    episode_id
-                ].add(
-                    gt_idx_int
-                )
-
-                matched = True
-
-                break
-
-
-        if matched:
-
-            tp.append(1.0)
-            fp.append(0.0)
-
-        else:
-
-            tp.append(0.0)
-            fp.append(1.0)
-
-
-    tp = np.asarray(
-        tp,
-        dtype=np.float64
-    )
-
-
-    fp = np.asarray(
-        fp,
-        dtype=np.float64
-    )
-
-
-    cumulative_tp = np.cumsum(
-        tp
-    )
-
-
-    cumulative_fp = np.cumsum(
-        fp
-    )
-
-
-    recall = (
-
-        cumulative_tp
-
-        /
-
-        float(
-            max(
-                total_gt,
-                1
-            )
-        )
-    )
-
-
-    precision = (
-
-        cumulative_tp
-
-        /
-
-        np.maximum(
-
-            cumulative_tp
-            +
-            cumulative_fp,
-
-            1e-12
-        )
-    )
-
-
-    # ------------------------------------------------------
-    # Precision envelope / all-point AP.
-    #
-    # Same integration rule as previous notebook;
-    # only semantic-class aggregation is corrected.
-    # ------------------------------------------------------
-
-    mrec = np.concatenate(
-
+    a = as_numpy(
+        boxes_a
+    ).reshape(-1, 4)
+
+    b = as_numpy(
+        boxes_b
+    ).reshape(-1, 4)
+
+    # Normalized cxcywh -> xyxy
+    a = np.concatenate(
         (
-            [0.0],
-            recall,
-            [1.0]
-        )
+            a[:, :2] - a[:, 2:] / 2,
+            a[:, :2] + a[:, 2:] / 2,
+        ),
+        axis=1,
     )
 
-
-    mpre = np.concatenate(
-
+    b = np.concatenate(
         (
-            [0.0],
-            precision,
-            [0.0]
-        )
+            b[:, :2] - b[:, 2:] / 2,
+            b[:, :2] + b[:, 2:] / 2,
+        ),
+        axis=1,
     )
 
-
-    for i in range(
-
-        len(mpre) - 2,
-        -1,
-        -1
-    ):
-
-        mpre[i] = max(
-
-            mpre[i],
-
-            mpre[i + 1]
-        )
-
-
-    change_points = np.where(
-
-        mrec[1:]
-        !=
-        mrec[:-1]
-
-    )[0]
-
-
-    ap = np.sum(
-
+    wh = np.maximum(
+        0,
         (
-            mrec[
-                change_points + 1
-            ]
-
+            np.minimum(
+                a[:, None, 2:],
+                b[None, :, 2:]
+            )
             -
-
-            mrec[
-                change_points
-            ]
-        )
-
-        *
-
-        mpre[
-            change_points + 1
-        ]
-    )
-
-
-    return float(ap)
-
-
-# ==========================================================
-# CLASS-AWARE mAP50
-# ==========================================================
-
-def compute_classwise_map50(
-    prediction_records_by_class,
-    gt_boxes_by_class,
-    total_gt_by_class,
-    iou_threshold=0.50
-):
-
-    class_ap50 = {}
-
-
-    # ------------------------------------------------------
-    # Evaluate ONLY classes present in current loader.
-    #
-    # Full COCO-Val -> all 80
-    # Tiny set     -> only classes represented by tiny set
-    # ------------------------------------------------------
-
-    evaluated_classes = sorted(
-
-        class_label
-
-        for class_label
-        in total_gt_by_class.keys()
-
-        if (
-            total_gt_by_class[
-                class_label
-            ]
-            >
-            0
-        )
-    )
-
-
-    if len(evaluated_classes) == 0:
-
-        return (
-            0.0,
-            {}
-        )
-
-
-    for class_label in (
-        evaluated_classes
-    ):
-
-        class_ap50[
-            int(class_label)
-        ] = compute_single_class_ap50(
-
-            prediction_records=
-                prediction_records_by_class[
-                    class_label
-                ],
-
-            episode_gt_boxes=
-                gt_boxes_by_class[
-                    class_label
-                ],
-
-            total_gt=
-                total_gt_by_class[
-                    class_label
-                ],
-
-            iou_threshold=
-                iou_threshold
-        )
-
-
-    map50 = float(
-
-        np.mean(
-
-            list(
-                class_ap50.values()
+            np.maximum(
+                a[:, None, :2],
+                b[None, :, :2]
             )
         )
     )
 
+    intersection = wh.prod(
+        axis=-1
+    )
 
-    return (
-        map50,
-        class_ap50
+    area_a = np.maximum(
+        0,
+        a[:, 2:] - a[:, :2]
+    ).prod(
+        axis=-1
+    )
+
+    area_b = np.maximum(
+        0,
+        b[:, 2:] - b[:, :2]
+    ).prod(
+        axis=-1
+    )
+
+    union = (
+        area_a[:, None]
+        + area_b[None, :]
+        - intersection
+    )
+
+    return intersection / np.maximum(
+        union,
+        1e-6
     )
 
 
-# ==========================================================
-# THRESHOLD P/R FOR ONE EPISODE
-# ==========================================================
-
-def match_episode_predictions(
+def greedy_match_flags(
     scores,
     pred_boxes,
     gt_boxes,
-    score_threshold=0.50,
-    iou_threshold=0.50
+    iou_threshold,
 ):
-
-    keep = torch.where(
-
+    scores = as_numpy(
         scores
-        >=
-        score_threshold
+    ).reshape(-1)
 
-    )[0]
-
-
-    if len(keep) == 0:
-
-        return (
-            0,
-            0,
-            len(gt_boxes)
-        )
-
-
-    # Highest-confidence predictions first.
-
-    kept_scores = (
-        scores[
-            keep
-        ]
+    ious = numpy_box_iou(
+        pred_boxes,
+        gt_boxes
     )
 
+    used = set()
 
-    order = torch.argsort(
-
-        kept_scores,
-
-        descending=True
+    flags = np.zeros(
+        len(scores),
+        dtype=np.float64
     )
 
-
-    keep = (
-        keep[
-            order
-        ]
-    )
-
-
-    matched_gt = set()
-
-    tp = 0
-    fp = 0
-
-
-    if len(gt_boxes) > 0:
-
-        gt_xyxy = (
-            box_cxcywh_to_xyxy(
-                gt_boxes
-            )
-        )
-
-    else:
-
-        gt_xyxy = None
-
-
-    for pred_idx in keep:
-
-        if len(gt_boxes) == 0:
-
-            fp += 1
-
-            continue
-
-
-        pred_xyxy = (
-            box_cxcywh_to_xyxy(
-
-                pred_boxes[
-                    pred_idx
-                ]
-
-                .unsqueeze(0)
-            )
-        )
-
-
-        ious, _ = box_iou(
-
-            pred_xyxy,
-
-            gt_xyxy
-        )
-
-
-        candidate_order = torch.argsort(
-
-            ious[0],
-
-            descending=True
-        )
-
-
-        matched = False
-
-
-        for gt_idx in (
-            candidate_order
+    for pred_id in np.argsort(
+        -scores,
+        kind="stable"
+    ):
+        for gt_id in np.argsort(
+            -ious[pred_id],
+            kind="stable"
         ):
-
-            gt_idx_int = int(
-                gt_idx.item()
-            )
-
-
             if (
-                gt_idx_int
-                in matched_gt
+                gt_id not in used
+                and ious[pred_id, gt_id] >= iou_threshold
             ):
-
-                continue
-
-
-            if (
-                ious[
-                    0,
-                    gt_idx_int
-                ].item()
-                >=
-                iou_threshold
-            ):
-
-                matched_gt.add(
-                    gt_idx_int
+                used.add(
+                    int(gt_id)
                 )
 
-                tp += 1
-
-                matched = True
-
+                flags[pred_id] = 1.0
                 break
 
-
-        if not matched:
-
-            fp += 1
+    return flags
 
 
-    fn = (
+def compute_person_metrics(
+    episodes,
+    score_threshold=0.5,
+    iou_threshold=0.5,
+):
+    all_scores = []
+    all_flags = []
+    best_ious = []
+    maximum_scores = []
 
-        len(gt_boxes)
+    total_gt = 0
+    tp = 0
+    fp = 0
+    fn = 0
+    geometry_hits = 0
 
-        -
-        len(matched_gt)
+    for episode in episodes:
+        scores = as_numpy(
+            episode["scores"]
+        ).reshape(-1)
+
+        boxes = as_numpy(
+            episode["pred_boxes"]
+        ).reshape(-1, 4)
+
+        gt = as_numpy(
+            episode["gt_boxes"]
+        ).reshape(-1, 4)
+
+        assert len(scores) == len(boxes)
+
+        assert all(
+            np.isfinite(value).all()
+            for value in (
+                scores,
+                boxes,
+                gt,
+            )
+        )
+
+        total_gt += len(gt)
+
+        # Semua prediksi untuk AP.
+        flags = greedy_match_flags(
+            scores,
+            boxes,
+            gt,
+            iou_threshold
+        )
+
+        all_scores.extend(
+            scores.tolist()
+        )
+
+        all_flags.extend(
+            flags.tolist()
+        )
+
+        # Prediksi di atas cutoff untuk precision/recall.
+        keep = (
+            scores >= score_threshold
+        )
+
+        kept_flags = greedy_match_flags(
+            scores[keep],
+            boxes[keep],
+            gt,
+            iou_threshold
+        )
+
+        episode_tp = int(
+            kept_flags.sum()
+        )
+
+        tp += episode_tp
+        fp += int(keep.sum()) - episode_tp
+        fn += len(gt) - episode_tp
+
+        maximum_scores.append(
+            float(scores.max())
+            if len(scores)
+            else 0.0
+        )
+
+        ious = numpy_box_iou(
+            boxes,
+            gt
+        )
+
+        if len(gt):
+            best_ious.extend(
+                ious.max(axis=0).tolist()
+                if len(boxes)
+                else [0.0] * len(gt)
+            )
+
+        if len(boxes) and len(gt):
+            # Confidence-free, one-to-one localization.
+            # Prioritas: memaksimalkan jumlah pasangan
+            # yang mencapai IoU threshold.
+            reward = (
+                (ious >= iou_threshold).astype(float)
+                + ious / (min(ious.shape) + 1)
+            )
+
+            rows, cols = linear_sum_assignment(
+                -reward
+            )
+
+            geometry_hits += int(
+                (
+                    ious[rows, cols]
+                    >= iou_threshold
+                ).sum()
+            )
+
+    scores = np.asarray(
+        all_scores
     )
 
-
-    return (
-        tp,
-        fp,
-        fn
+    flags = np.asarray(
+        all_flags
     )
 
+    ap = 0.0
 
-# ==========================================================
-# FULL CLASS-AWARE EPISODIC EVALUATOR
-# ==========================================================
+    if total_gt and len(scores):
+        flags_sorted = flags[
+            np.argsort(
+                -scores,
+                kind="stable"
+            )
+        ]
+
+        cumulative_tp = np.cumsum(
+            flags_sorted
+        )
+
+        recall = (
+            cumulative_tp / total_gt
+        )
+
+        precision = (
+            cumulative_tp
+            /
+            np.arange(
+                1,
+                len(flags_sorted) + 1
+            )
+        )
+
+        mrec = np.r_[
+            0.0,
+            recall,
+            1.0
+        ]
+
+        mpre = np.r_[
+            0.0,
+            precision,
+            0.0
+        ]
+
+        mpre = np.maximum.accumulate(
+            mpre[::-1]
+        )[::-1]
+
+        changes = np.where(
+            mrec[1:] != mrec[:-1]
+        )[0]
+
+        ap = float(
+            np.sum(
+                (
+                    mrec[changes + 1]
+                    - mrec[changes]
+                )
+                *
+                mpre[changes + 1]
+            )
+        )
+
+    iou_values = np.asarray(
+        best_ious
+    )
+
+    mean_tp_score = (
+        float(
+            scores[flags == 1].mean()
+        )
+        if flags.sum()
+        else None
+    )
+
+    mean_fp_score = (
+        float(
+            scores[flags == 0].mean()
+        )
+        if (flags == 0).any()
+        else None
+    )
+
+    return {
+        "person_ap50": ap,
+
+        "precision50": (
+            tp / max(tp + fp, 1)
+        ),
+
+        "recall50": (
+            tp / max(total_gt, 1)
+        ),
+
+        "tp": tp,
+        "fp": fp,
+        "fn": fn,
+        "total_gt": total_gt,
+        "episodes": len(episodes),
+
+        "mean_best_iou": (
+            float(iou_values.mean())
+            if len(iou_values)
+            else 0.0
+        ),
+
+        "median_best_iou": (
+            float(np.median(iou_values))
+            if len(iou_values)
+            else 0.0
+        ),
+
+        "localization_recall50": (
+            float(
+                (
+                    iou_values >= iou_threshold
+                ).mean()
+            )
+            if len(iou_values)
+            else 0.0
+        ),
+
+        "one_to_one_localization_recall50": (
+            geometry_hits / max(total_gt, 1)
+        ),
+
+        "mean_max_score": (
+            float(np.mean(maximum_scores))
+            if maximum_scores
+            else 0.0
+        ),
+
+        "mean_tp_score_all_predictions": mean_tp_score,
+        "mean_fp_score_all_predictions": mean_fp_score,
+    }
+
 
 def evaluate_episodic_model(
     model,
     data_loader,
     criterion,
     device,
-    score_threshold=0.50,
-    iou_threshold=0.50,
-    show_progress=True
+    score_threshold=0.5,
+    iou_threshold=0.5,
+    show_progress=True,
 ):
+    assert iou_threshold == 0.5, (
+        "This revision reports AP50 only."
+    )
 
     model.eval()
 
-
-    # ------------------------------------------------------
-    # LOSS
-    # ------------------------------------------------------
-
+    episodes = []
     total_loss = 0.0
-    num_batches = 0
-
-
-    # ------------------------------------------------------
-    # CLASS-AWARE AP STORAGE
-    #
-    # prediction_records_by_class[class] -> list
-    #
-    # gt_boxes_by_class[class][episode_id] -> GT
-    #
-    # total_gt_by_class[class] -> count
-    # ------------------------------------------------------
-
-    prediction_records_by_class = (
-        defaultdict(list)
-    )
-
-
-    gt_boxes_by_class = (
-        defaultdict(dict)
-    )
-
-
-    total_gt_by_class = (
-        defaultdict(int)
-    )
-
-
-    # ------------------------------------------------------
-    # MICRO P/R
-    # ------------------------------------------------------
-
-    total_tp = 0
-    total_fp = 0
-    total_fn = 0
-
-
-    # ------------------------------------------------------
-    # OPTIONAL CLASS-SPECIFIC P/R
-    # ------------------------------------------------------
-
-    tp_by_class = (
-        defaultdict(int)
-    )
-
-    fp_by_class = (
-        defaultdict(int)
-    )
-
-    fn_by_class = (
-        defaultdict(int)
-    )
-
-
-    # ------------------------------------------------------
-    # LOCALIZATION DIAGNOSTIC
-    # score-independent
-    # ------------------------------------------------------
-
-    best_ious_all_gt = []
-
-
-    episode_counter = 0
-
+    batches = 0
 
     iterator = (
-        data_loader
+        tqdm(
+            data_loader,
+            desc="Person validation"
+        )
+        if show_progress
+        else data_loader
     )
 
-
-    if show_progress:
-
-        iterator = tqdm(
-
-            data_loader,
-
-            desc="COCO Validation"
-        )
-
-
     with torch.inference_mode():
-
         for batch in iterator:
-
-            support_images = (
-
-                batch[
-                    "support_images"
-                ]
-
-                .to(
-                    device,
-                    non_blocking=True
-                )
-            )
-
-
-            query_images = (
-
-                batch[
-                    "query_images"
-                ]
-
-                .to(
-                    device,
-                    non_blocking=True
-                )
-            )
-
+            assert (
+                batch["episode_classes"] == 0
+            ).all()
 
             targets = move_targets_to_device(
-
-                batch[
-                    "query_targets"
-                ],
-
+                batch["query_targets"],
                 device
             )
 
-
-            # ------------------------------------------------
-            # Semantic episode classes.
-            # THIS WAS MISSING FROM OLD EVALUATOR.
-            # ------------------------------------------------
-
-            episode_classes = (
-
-                batch[
-                    "episode_classes"
-                ]
-
-                .detach()
-                .cpu()
-                .long()
-            )
-
-
-            outputs = model(
-
-                support_images,
-
-                query_images
-            )
-
-
-            loss_dict = criterion(
-
-                outputs,
-
-                targets
-            )
-
-
-            total_loss += float(
-
-                loss_dict[
-                    "loss_total"
-                ].item()
-            )
-
-
-            num_batches += 1
-
-
-            batch_size = (
-
-                outputs[
-                    "pred_logits"
-                ].shape[0]
-            )
-
-
-            assert (
-                len(
-                    episode_classes
-                )
-                ==
-                batch_size
-            )
-
-
-            for b in range(
-                batch_size
-            ):
-
-                class_label = int(
-
-                    episode_classes[
-                        b
-                    ].item()
-                )
-
-
-                scores = (
-
-                    outputs[
-                        "pred_logits"
-                    ][
-                        b,
-                        :,
-                        0
-                    ]
-
-                    .sigmoid()
-
-                    .detach()
-                    .cpu()
-                )
-
-
-                pred_boxes = (
-
-                    outputs[
-                        "pred_boxes"
-                    ][b]
-
-                    .detach()
-                    .cpu()
-                )
-
-
-                gt_boxes = (
-
-                    targets[b][
-                        "boxes"
-                    ]
-
-                    .detach()
-                    .cpu()
-                )
-
-
-                episode_id = (
-                    episode_counter
-                )
-
-
-                episode_counter += 1
-
-
-                # =================================================
-                # CLASS-AWARE GT
-                # =================================================
-
-                gt_boxes_by_class[
-                    class_label
-                ][
-                    episode_id
-                ] = gt_boxes
-
-
-                total_gt_by_class[
-                    class_label
-                ] += len(
-                    gt_boxes
-                )
-
-
-                # =================================================
-                # CLASS-AWARE AP RECORDS
-                #
-                # All queries in an episode are predictions
-                # of that episode's support semantic class.
-                # =================================================
-
-                for q in range(
-                    len(scores)
-                ):
-
-                    prediction_records_by_class[
-                        class_label
-                    ].append({
-
-                        "episode_id":
-                            episode_id,
-
-                        "score":
-                            float(
-                                scores[q].item()
-                            ),
-
-                        "box":
-                            pred_boxes[q],
-                    })
-
-
-                # =================================================
-                # MICRO P/R
-                # =================================================
-
+            assert all(
                 (
-                    tp,
-                    fp,
-                    fn
-                ) = match_episode_predictions(
+                    target["labels"] == 0
+                ).all()
+                for target in targets
+            )
 
-                    scores=
-                        scores,
+            output = model(
+                batch["support_images"].to(device),
+                batch["query_images"].to(device),
+            )
 
-                    pred_boxes=
-                        pred_boxes,
+            loss = criterion(
+                output,
+                targets
+            )["loss_total"]
 
-                    gt_boxes=
-                        gt_boxes,
-
-                    score_threshold=
-                        score_threshold,
-
-                    iou_threshold=
-                        iou_threshold
+            if not torch.isfinite(loss):
+                raise RuntimeError(
+                    "Non-finite validation loss."
                 )
 
+            total_loss += loss.item()
+            batches += 1
 
-                total_tp += tp
-                total_fp += fp
-                total_fn += fn
+            for index, target in enumerate(targets):
+                episodes.append({
+                    "scores": as_numpy(
+                        output["pred_logits"][
+                            index, :, 0
+                        ].sigmoid()
+                    ),
 
+                    "pred_boxes": as_numpy(
+                        output["pred_boxes"][index]
+                    ),
 
-                tp_by_class[
-                    class_label
-                ] += tp
+                    "gt_boxes": as_numpy(
+                        target["boxes"]
+                    ),
+                })
 
-
-                fp_by_class[
-                    class_label
-                ] += fp
-
-
-                fn_by_class[
-                    class_label
-                ] += fn
-
-
-                # =================================================
-                # LOCALIZATION ONLY
-                #
-                # Best IoU among ALL object queries,
-                # independent of classification score.
-                # =================================================
-
-                if len(gt_boxes) > 0:
-
-                    pred_xyxy = (
-                        box_cxcywh_to_xyxy(
-                            pred_boxes
-                        )
-                    )
-
-
-                    gt_xyxy = (
-                        box_cxcywh_to_xyxy(
-                            gt_boxes
-                        )
-                    )
-
-
-                    iou_matrix, _ = box_iou(
-
-                        pred_xyxy,
-
-                        gt_xyxy
-                    )
-
-
-                    best_per_gt = (
-
-                        iou_matrix
-
-                        .max(
-                            dim=0
-                        )
-
-                        .values
-                    )
-
-
-                    best_ious_all_gt.extend(
-
-                        best_per_gt
-                        .tolist()
-                    )
-
-
-    # ==========================================================
-    # CLASS-WISE AP -> mAP
-    # ==========================================================
-
-    (
-        map50,
-        per_class_ap50
-    ) = compute_classwise_map50(
-
-        prediction_records_by_class=
-            prediction_records_by_class,
-
-        gt_boxes_by_class=
-            gt_boxes_by_class,
-
-        total_gt_by_class=
-            total_gt_by_class,
-
-        iou_threshold=
-            iou_threshold
-    )
-
-
-    evaluated_classes = sorted(
-
-        per_class_ap50.keys()
-    )
-
-
-    # ==========================================================
-    # MICRO PRECISION / RECALL
-    # ==========================================================
-
-    precision50 = (
-
-        total_tp
-
-        /
-
-        max(
-            total_tp
-            +
-            total_fp,
-
-            1
+    if not batches:
+        raise RuntimeError(
+            "Empty evaluation loader."
         )
-    )
-
-
-    recall50 = (
-
-        total_tp
-
-        /
-
-        max(
-            total_tp
-            +
-            total_fn,
-
-            1
-        )
-    )
-
-
-    # ==========================================================
-    # OPTIONAL MACRO CLASS PRECISION / RECALL
-    # ==========================================================
-
-    per_class_precision50 = {}
-    per_class_recall50 = {}
-
-
-    for class_label in (
-        evaluated_classes
-    ):
-
-        class_tp = (
-            tp_by_class[
-                class_label
-            ]
-        )
-
-        class_fp = (
-            fp_by_class[
-                class_label
-            ]
-        )
-
-        class_fn = (
-            fn_by_class[
-                class_label
-            ]
-        )
-
-
-        per_class_precision50[
-            class_label
-        ] = (
-
-            class_tp
-
-            /
-
-            max(
-                class_tp
-                +
-                class_fp,
-
-                1
-            )
-        )
-
-
-        per_class_recall50[
-            class_label
-        ] = (
-
-            class_tp
-
-            /
-
-            max(
-                class_tp
-                +
-                class_fn,
-
-                1
-            )
-        )
-
-
-    macro_precision50 = (
-
-        float(
-
-            np.mean(
-
-                list(
-                    per_class_precision50
-                    .values()
-                )
-            )
-        )
-
-        if
-        len(
-            per_class_precision50
-        )
-        >
-        0
-
-        else
-        0.0
-    )
-
-
-    macro_recall50 = (
-
-        float(
-
-            np.mean(
-
-                list(
-                    per_class_recall50
-                    .values()
-                )
-            )
-        )
-
-        if
-        len(
-            per_class_recall50
-        )
-        >
-        0
-
-        else
-        0.0
-    )
-
-
-    # ==========================================================
-    # LOCALIZATION METRICS
-    # ==========================================================
-
-    best_ious_np = np.asarray(
-
-        best_ious_all_gt,
-
-        dtype=np.float64
-    )
-
-
-    if len(best_ious_np) > 0:
-
-        mean_best_iou = float(
-            best_ious_np.mean()
-        )
-
-
-        localization_recall30 = float(
-
-            np.mean(
-                best_ious_np
-                >=
-                0.30
-            )
-        )
-
-
-        localization_recall50 = float(
-
-            np.mean(
-                best_ious_np
-                >=
-                0.50
-            )
-        )
-
-
-        localization_recall75 = float(
-
-            np.mean(
-                best_ious_np
-                >=
-                0.75
-            )
-        )
-
-
-    else:
-
-        mean_best_iou = 0.0
-
-        localization_recall30 = 0.0
-
-        localization_recall50 = 0.0
-
-        localization_recall75 = 0.0
-
-
-    total_gt = int(
-
-        sum(
-            total_gt_by_class.values()
-        )
-    )
-
 
     return {
+        **compute_person_metrics(
+            episodes,
+            score_threshold,
+            iou_threshold
+        ),
 
-        # --------------------------------------------------
-        # Existing keys preserved
-        # so Steps 28/29 do not break.
-        # --------------------------------------------------
-
-        "loss":
-            (
-                total_loss
-
-                /
-                max(
-                    num_batches,
-                    1
-                )
-            ),
-
-        "episodic_map50":
-            float(
-                map50
-            ),
-
-        # MICRO P/R
-        "precision50":
-            float(
-                precision50
-            ),
-
-        "recall50":
-            float(
-                recall50
-            ),
-
-        # Additional macro P/R
-        "macro_precision50":
-            float(
-                macro_precision50
-            ),
-
-        "macro_recall50":
-            float(
-                macro_recall50
-            ),
-
-        # Localization
-        "mean_best_iou":
-            float(
-                mean_best_iou
-            ),
-
-        "localization_recall30":
-            float(
-                localization_recall30
-            ),
-
-        "localization_recall50":
-            float(
-                localization_recall50
-            ),
-
-        "localization_recall75":
-            float(
-                localization_recall75
-            ),
-
-        # Diagnostics
-        "total_gt":
-            total_gt,
-
-        "num_eval_classes":
-            int(
-                len(
-                    evaluated_classes
-                )
-            ),
-
-        "evaluated_classes":
-            evaluated_classes,
-
-        "per_class_ap50":
-            per_class_ap50,
-
-        "per_class_precision50":
-            per_class_precision50,
-
-        "per_class_recall50":
-            per_class_recall50,
+        "loss": total_loss / batches,
     }
 
 
-print("=" * 70)
-print("STEP 25 : CLASS-AWARE COCO EVALUATOR READY")
-print("=" * 70)
+def print_person_metrics(
+    title,
+    metrics,
+):
+    print(
+        title,
+        "| loss:",
+        round(metrics["loss"], 4),
 
-print(
-    "AP protocol:"
-)
+        "| AP50: %.4f%%"
+        % (
+            100 * metrics["person_ap50"]
+        ),
 
-print(
-    "  AP50 computed independently for each "
-    "semantic COCO episode class."
-)
+        "| P/R: %.4f / %.4f"
+        % (
+            metrics["precision50"],
+            metrics["recall50"]
+        ),
 
-print(
-    "  mAP50 = mean of per-class AP50."
-)
+        "| mean IoU: %.4f"
+        % metrics["mean_best_iou"],
 
-print(
-    "  Full fixed COCO-Val should evaluate 80 classes."
-)
+        "| geometry recall: %.4f"
+        % metrics["one_to_one_localization_recall50"],
+    )
 
-print(
-    "  Tiny subsets average only classes present."
-)
 
-print(
-    "Precision/Recall:"
-)
-
-print(
-    "  precision50 / recall50 = MICRO across episodes."
-)
-
-print(
-    "  macro_precision50 / macro_recall50 also returned."
-)
-
-print("=" * 70)
+print("STEP 25 READY.")
+print("AP uses all scores; P/R use the explicit score cutoff.")
+print("Localization diagnostics are confidence-free.")
