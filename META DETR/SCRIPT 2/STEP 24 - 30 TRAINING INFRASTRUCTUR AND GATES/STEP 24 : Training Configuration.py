@@ -1,608 +1,315 @@
 # ==========================================================
-# STEP 24 : Training Configuration
-# FINAL CLEAN PROTOCOL
+# STEP 24: Person-Only Training Configuration and Helpers
 # ==========================================================
 
-import copy
-import os
+import gc
+import json
 
-import torch
-import torch.nn as nn
-import torch.optim as optim
+from itertools import islice
+from torch.optim.lr_scheduler import MultiStepLR
+from tqdm.auto import tqdm
 
-from torch.optim.lr_scheduler import (
-    MultiStepLR
-)
-
-
-# ==========================================================
-# DEPENDENCY CHECK
-# ==========================================================
-
-assert "model" in globals(), (
-    "Run STEP 11 first."
-)
-
-assert "criterion" in globals(), (
-    "Run STEP 21 first."
-)
-
-assert "support_rank_criterion" in globals(), (
-    "Run STEP 22 first."
-)
-
-assert "train_loader" in globals(), (
-    "Run STEP 18 first."
-)
-
-
-# ==========================================================
-# LOCKED TRAINING CONFIG
-# ==========================================================
 
 TRAIN_CONFIG = {
+    # Digunakan untuk rencana full source training berikutnya.
+    "epochs": 25,
+    "steps_per_epoch": 800,
 
-    "epochs":
-        25,
+    # Optimizer tetap seperti konfigurasi awal.
+    "learning_rate": 1e-4,
+    "backbone_learning_rate": 1e-5,
+    "weight_decay": 1e-4,
+    "gradient_clip": 0.1,
 
-    "steps_per_epoch":
-        800,
+    "milestones": [15, 20],
+    "gamma": 0.1,
 
-    "learning_rate":
-        1e-4,
+    # Evaluation
+    "score_threshold": 0.5,
+    "iou_threshold": 0.5,
 
-    "backbone_learning_rate":
-        1e-5,
+    # Tiny learning
+    "tiny_episodes": 10,
+    "tiny_epochs": 100,
 
-    "weight_decay":
-        1e-4,
+    # Default diagnosis; bukan target performa akhir tesis.
+    "tiny_ap50_floor": 0.80,
+    "tiny_localization_recall_floor": 0.80,
 
-    "gradient_clip":
-        0.1,
+    # Short generalization
+    "short_epochs": 5,
+    "short_steps_per_epoch": 800,
 
-    "milestones":
-        [15, 20],
+    "short_map50_absolute_floor": 0.01,
+    "short_map50_relative_factor": 1.25,
 
-    "gamma":
-        0.1,
-
-    "validation_episodes":
-        800,
-
-    "score_threshold":
-        0.50,
-
-    "iou_threshold":
-        0.50,
-
-    # ----------------------------------------------
-    # Pre-training gates
-    # ----------------------------------------------
-
-    "tiny_episodes":
-        10,
-
-    "tiny_epochs":
-        100,
-
-    "short_epochs":
-        5,
-
-    "short_steps_per_epoch":
-        800,
-
-    # Minimum short-generalization requirement.
-    #
-    # mAP must:
-    # 1. reach at least 0.01
-    # 2. reach at least 1.25× its own baseline
-    #
-    # This is only the GO/NO-GO gate,
-    # not the final performance target.
-    # ----------------------------------------------
-
-    "short_map50_absolute_floor":
-        0.01,
-
-    "short_map50_relative_factor":
-        1.25,
+    # Menghindari kelulusan hanya karena satu lonjakan epoch.
+    "short_min_epochs_above_floor": 2,
 }
 
 
-# ==========================================================
-# BACKBONE BN
-#
-# Parameters remain trainable.
-# Only running statistics are frozen.
-# ==========================================================
+def reset_trial_seed():
+    random.seed(
+        CONFIG["seed"]
+    )
+
+    np.random.seed(
+        CONFIG["seed"]
+    )
+
+    torch.manual_seed(
+        CONFIG["seed"]
+    )
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(
+            CONFIG["seed"]
+        )
+
+
+def make_trial_model():
+    # Official model tetap memakai bobot awal.
+    # Dipindah ke CPU agar tidak ada dua model penuh di GPU.
+    model.cpu()
+
+    gc.collect()
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    reset_trial_seed()
+
+    return copy.deepcopy(
+        model
+    ).to(
+        CONFIG["device"]
+    )
+
 
 def freeze_backbone_bn_statistics(
-    backbone
+    backbone,
 ):
-
+    # Membekukan running statistics BN.
+    # Parameter backbone tetap trainable.
     for module in backbone.modules():
-
         if isinstance(
             module,
             nn.BatchNorm2d
         ):
-
             module.eval()
 
 
-# ==========================================================
-# OPTIMIZER / SCHEDULER BUILDER
-# ==========================================================
-
 def build_optimizer_and_scheduler(
-    target_model
+    target_model,
 ):
-
-    backbone_parameters = [
-
+    backbone_params = [
         parameter
-
-        for parameter
-        in target_model.backbone.parameters()
-
+        for parameter in target_model.backbone.parameters()
         if parameter.requires_grad
     ]
 
-
     backbone_ids = {
-
         id(parameter)
-
-        for parameter
-        in backbone_parameters
+        for parameter in backbone_params
     }
 
-
-    main_parameters = [
-
+    main_params = [
         parameter
-
-        for parameter
-        in target_model.parameters()
-
+        for parameter in target_model.parameters()
         if (
             parameter.requires_grad
-            and
-            id(parameter)
-            not in backbone_ids
+            and id(parameter) not in backbone_ids
         )
     ]
 
-
-    optimizer = optim.AdamW(
-
+    optimizer = torch.optim.AdamW(
         [
-
             {
-                "params":
-                    main_parameters,
-
-                "lr":
-                    TRAIN_CONFIG[
-                        "learning_rate"
-                    ],
-
-                "name":
-                    "main"
+                "params": main_params,
+                "lr": TRAIN_CONFIG["learning_rate"],
             },
-
             {
-                "params":
-                    backbone_parameters,
-
-                "lr":
-                    TRAIN_CONFIG[
-                        "backbone_learning_rate"
-                    ],
-
-                "name":
-                    "backbone"
+                "params": backbone_params,
+                "lr": TRAIN_CONFIG["backbone_learning_rate"],
             },
         ],
-
-        weight_decay=
-            TRAIN_CONFIG[
-                "weight_decay"
-            ]
+        weight_decay=TRAIN_CONFIG["weight_decay"],
     )
-
 
     scheduler = MultiStepLR(
-
         optimizer,
-
-        milestones=
-            TRAIN_CONFIG[
-                "milestones"
-            ],
-
-        gamma=
-            TRAIN_CONFIG[
-                "gamma"
-            ]
+        milestones=TRAIN_CONFIG["milestones"],
+        gamma=TRAIN_CONFIG["gamma"],
     )
 
-
-    return (
-        optimizer,
-        scheduler
-    )
+    return optimizer, scheduler
 
 
-# ==========================================================
-# ONE COMBINED TRAINING FORWARD
-#
-# IMPORTANT:
-# Correct detection + absent wrong support
-# use the SAME decoder objects.
-# ==========================================================
-
-def compute_combined_training_loss(
+def compute_detection_training_loss(
     target_model,
     batch,
-    dataset,
-    epoch,
-    step,
-    device
+    device,
 ):
+    assert (
+        batch["episode_classes"] == 0
+    ).all()
 
-    support_images = (
-
-        batch[
-            "support_images"
-        ]
-        .to(
-            device,
-            non_blocking=True
-        )
+    targets = move_targets_to_device(
+        batch["query_targets"],
+        device
     )
 
-
-    query_images = (
-
-        batch[
-            "query_images"
-        ]
-        .to(
-            device,
-            non_blocking=True
-        )
+    outputs = target_model(
+        batch["support_images"].to(device),
+        batch["query_images"].to(device),
     )
 
-
-    query_targets = (
-        move_targets_to_device(
-
-            batch[
-                "query_targets"
-            ],
-
-            device
-        )
-    )
-
-
-    episode_classes = (
-
-        batch[
-            "episode_classes"
-        ]
-    )
-
-
-    # ======================================================
-    # CORRECT SUPPORT FORWARD
-    # ======================================================
-
-    (
+    losses = criterion(
         outputs,
-        extras
-    ) = target_model.forward_with_features(
-
-        support_image=
-            support_images,
-
-        query_image=
-            query_images
+        targets
     )
 
-
-    # ======================================================
-    # MATCH ON CORRECT-SUPPORT PREDICTIONS
-    # ======================================================
-
-    indices = matcher(
-
-        outputs,
-
-        query_targets
-    )
-
-
-    # ======================================================
-    # DETECTION LOSS
-    # ======================================================
-
-    detection_losses = criterion(
-
-        outputs,
-
-        query_targets,
-
-        indices=
-            indices
-    )
-
-
-    # ======================================================
-    # ABSENT WRONG SUPPORT FOR EACH BATCH ITEM
-    #
-    # Current protocol locks B=1,
-    # but this remains batch-safe.
-    # ======================================================
-
-    wrong_support_list = []
-    wrong_classes = []
-
-
-    for batch_idx in range(
-        support_images.shape[0]
+    if not all(
+        torch.isfinite(value).all()
+        for value in losses.values()
     ):
-
-        current_class = int(
-
-            episode_classes[
-                batch_idx
-            ].item()
-        )
-
-
-        query_image_id = int(
-
-            batch[
-                "query_targets"
-            ][
-                batch_idx
-            ][
-                "image_id"
-            ].item()
-        )
-
-
-        wrong_episode = (
-            sample_absent_wrong_support(
-
-                dataset=
-                    dataset,
-
-                query_image_id=
-                    query_image_id,
-
-                current_class=
-                    current_class,
-
-                epoch=
-                    epoch,
-
-                step=
-                    (
-                        int(step)
-                        +
-                        batch_idx
-                    )
-            )
-        )
-
-
-        wrong_support_list.append(
-
-            wrong_episode[
-                "image"
-            ]
-        )
-
-
-        wrong_classes.append(
-
-            wrong_episode[
-                "class"
-            ]
-        )
-
-
-    wrong_support_images = (
-
-        torch.stack(
-            wrong_support_list
-        )
-
-        .to(
-            device,
-            non_blocking=True
-        )
-    )
-
-
-    # ======================================================
-    # MATCHED-QUERY SUPPORT RANKING
-    # ======================================================
-
-    (
-        support_rank_loss,
-        support_rank_stats
-    ) = support_rank_criterion(
-
-        model=
-            target_model,
-
-        decoder_objects=
-            extras[
-                "decoder_objects"
-            ],
-
-        correct_similarity=
-            extras[
-                "support_similarity"
-            ],
-
-        wrong_support_images=
-            wrong_support_images,
-
-        indices=
-            indices
-    )
-
-
-    combined_loss = (
-
-        detection_losses[
-            "loss_total"
-        ]
-
-        +
-
-        CONFIG[
-            "support_rank_weight"
-        ]
-
-        *
-        support_rank_loss
-    )
-
-
-    if not torch.isfinite(
-        combined_loss
-    ):
-
         raise RuntimeError(
-            "Combined training loss became NaN/Inf."
+            "Non-finite detection loss."
         )
 
+    return losses
+
+
+def train_detection_epoch(
+    target_model,
+    loader,
+    optimizer,
+    max_steps,
+    description,
+    show_progress=True,
+):
+    target_model.train()
+
+    freeze_backbone_bn_statistics(
+        target_model.backbone
+    )
+
+    totals = {
+        key: 0.0
+        for key in (
+            "loss_cls",
+            "loss_bbox",
+            "loss_giou",
+            "loss_total",
+        )
+    }
+
+    count = 0
+
+    iterator = islice(
+        loader,
+        max_steps
+    )
+
+    if show_progress:
+        iterator = tqdm(
+            iterator,
+            total=min(
+                max_steps,
+                len(loader)
+            ),
+            desc=description,
+        )
+
+    for batch in iterator:
+        optimizer.zero_grad(
+            set_to_none=True
+        )
+
+        losses = compute_detection_training_loss(
+            target_model,
+            batch,
+            CONFIG["device"],
+        )
+
+        losses["loss_total"].backward()
+
+        torch.nn.utils.clip_grad_norm_(
+            target_model.parameters(),
+            TRAIN_CONFIG["gradient_clip"],
+            error_if_nonfinite=True,
+        )
+
+        optimizer.step()
+
+        for key in totals:
+            totals[key] += (
+                losses[key]
+                .detach()
+                .item()
+            )
+
+        count += 1
+
+    if count == 0:
+        raise RuntimeError(
+            "No training updates."
+        )
 
     return {
-
-        "outputs":
-            outputs,
-
-        "extras":
-            extras,
-
-        "targets":
-            query_targets,
-
-        "indices":
-            indices,
-
-        "detection_losses":
-            detection_losses,
-
-        "support_rank_loss":
-            support_rank_loss,
-
-        "support_rank_stats":
-            support_rank_stats,
-
-        "combined_loss":
-            combined_loss,
-
-        "wrong_classes":
-            wrong_classes,
+        **{
+            key: value / count
+            for key, value in totals.items()
+        },
+        "updates": count,
     }
 
 
-# ==========================================================
-# CHECKPOINT PATHS
-# ==========================================================
+def evaluate_person(
+    target_model,
+    loader,
+):
+    return evaluate_episodic_model(
+        model=target_model,
+        data_loader=loader,
+        criterion=criterion,
+        device=CONFIG["device"],
+        score_threshold=TRAIN_CONFIG["score_threshold"],
+        iou_threshold=TRAIN_CONFIG["iou_threshold"],
+        show_progress=False,
+    )
 
-os.makedirs(
+
+BEST_SOURCE_CHECKPOINT_PATH = os.path.join(
     CHECKPOINT_DIR,
-    exist_ok=True
+    "person_source_best.pth"
 )
 
-
-BEST_SOURCE_CHECKPOINT_PATH = (
-    os.path.join(
-
-        CHECKPOINT_DIR,
-
-        "meta_detr_final_clean_source_best.pth"
-    )
+LATEST_SOURCE_CHECKPOINT_PATH = os.path.join(
+    CHECKPOINT_DIR,
+    "person_source_latest.pth"
 )
-
-
-LATEST_SOURCE_CHECKPOINT_PATH = (
-    os.path.join(
-
-        CHECKPOINT_DIR,
-
-        "meta_detr_final_clean_source_latest.pth"
-    )
-)
-
 
 print("=" * 70)
-print("STEP 24 : TRAINING CONFIGURATION READY")
+print("STEP 24: TRAINING HELPERS READY")
 print("=" * 70)
 
 print(
-    "Official Epochs     :",
-    TRAIN_CONFIG[
-        "epochs"
-    ]
+    "Short training updates:",
+    (
+        TRAIN_CONFIG["short_epochs"]
+        * TRAIN_CONFIG["short_steps_per_epoch"]
+    )
 )
 
 print(
-    "Steps / Epoch       :",
-    TRAIN_CONFIG[
-        "steps_per_epoch"
-    ]
+    "Tiny diagnostic AP floor:",
+    TRAIN_CONFIG["tiny_ap50_floor"]
 )
 
 print(
-    "Main LR             :",
-    TRAIN_CONFIG[
-        "learning_rate"
-    ]
-)
-
-print(
-    "Backbone LR         :",
-    TRAIN_CONFIG[
-        "backbone_learning_rate"
-    ]
-)
-
-print(
-    "Weight Decay        :",
-    TRAIN_CONFIG[
-        "weight_decay"
-    ]
-)
-
-print(
-    "Gradient Clip       :",
-    TRAIN_CONFIG[
-        "gradient_clip"
-    ]
-)
-
-print(
-    "Support Rank Weight :",
-    CONFIG[
-        "support_rank_weight"
-    ]
-)
-
-print(
-    "Support Rank Margin :",
-    CONFIG[
-        "support_rank_margin"
-    ]
+    "Tiny diagnostic geometry recall floor:",
+    TRAIN_CONFIG["tiny_localization_recall_floor"]
 )
 
 print("=" * 70)
