@@ -1,19 +1,18 @@
 # ==========================================================
-# STEP 16 : COCO 1-Way Episodic Dataset
+# STEP 16: Person-Only Episodic Dataset
+#
+# Support: crop person.
+# Query: gambar penuh dengan seluruh person GT yang eligible.
+# Support dan query berasal dari gambar berbeda.
+#
+# Crowd dan bbox sangat kecil tetap dikecualikan.
 # ==========================================================
-
-import os
-import math
-import random
-
-import torch
 
 from PIL import Image
 from torch.utils.data import Dataset
 
 
 class COCOEpisodeDataset(Dataset):
-
     def __init__(
         self,
         coco,
@@ -22,856 +21,358 @@ class COCOEpisodeDataset(Dataset):
         query_transform,
         num_episodes,
         seed,
-        min_bbox_size=2.0
+        min_bbox_size=2.0,
     ):
-        super().__init__()
-
-
         self.coco = coco
+        self.image_dir = image_dir
 
-        self.image_dir = (
-            image_dir
-        )
+        self.support_transform = support_transform
+        self.query_transform = query_transform
 
-        self.support_transform = (
-            support_transform
-        )
-
-        self.query_transform = (
-            query_transform
-        )
-
-        self.num_episodes = int(
-            num_episodes
-        )
-
+        self.num_episodes = int(num_episodes)
         self.seed = int(seed)
-
         self.epoch = 0
 
-        self.min_bbox_size = float(
-            min_bbox_size
-        )
-
-
-        # --------------------------------------------------
-        # COCO semantic mapping
-        # --------------------------------------------------
+        self.min_bbox_size = float(min_bbox_size)
 
         self.cat_ids = sorted(
-            coco.getCatIds()
+            coco.getCatIds(
+                catNms=["person"]
+            )
         )
 
+        assert len(self.cat_ids) == 1
 
         self.cat2label = {
-
-            cat_id:
-                label
-
-            for label, cat_id
-            in enumerate(
-                self.cat_ids
-            )
+            self.cat_ids[0]: 0
         }
-
 
         self.label2cat = {
-
-            label:
-                cat_id
-
-            for cat_id, label
-            in self.cat2label.items()
+            0: self.cat_ids[0]
         }
 
-
-        # --------------------------------------------------
-        # Index valid object instances / images by class
-        # --------------------------------------------------
+        self.valid_labels = [0]
 
         self.class_to_ann_ids = {
-
-            label: []
-
-            for label in range(
-                len(self.cat_ids)
-            )
+            0: []
         }
 
+        self.image_to_ann_ids = {}
+        self.valid_xyxy = {}
 
-        self.class_to_img_ids = {
-
-            label: set()
-
-            for label in range(
-                len(self.cat_ids)
-            )
-        }
-
-
-        for (
-            ann_id,
-            ann
-        ) in coco.anns.items():
-
-            if ann.get(
-                "iscrowd",
-                0
-            ) == 1:
-
+        for ann_id, ann in coco.anns.items():
+            if ann.get("category_id") != self.cat_ids[0]:
                 continue
 
+            if ann.get("iscrowd", 0):
+                continue
 
             if "bbox" not in ann:
                 continue
 
+            info = coco.imgs[ann["image_id"]]
 
-            x, y, w, h = (
+            width = float(info["width"])
+            height = float(info["height"])
+
+            x, y, w, h = map(
+                float,
                 ann["bbox"]
             )
 
+            if width <= 0 or height <= 0:
+                continue
+
+            if not all(
+                map(
+                    math.isfinite,
+                    (x, y, w, h)
+                )
+            ):
+                continue
+
+            # Clip terhadap batas gambar.
+            x1 = max(0.0, x)
+            y1 = max(0.0, y)
+            x2 = min(width, x + w)
+            y2 = min(height, y + h)
 
             if (
-                w < self.min_bbox_size
-                or
-                h < self.min_bbox_size
+                x2 - x1 < self.min_bbox_size
+                or y2 - y1 < self.min_bbox_size
             ):
                 continue
 
+            ann_id = int(ann_id)
+            image_id = int(ann["image_id"])
 
-            cat_id = ann.get(
-                "category_id"
+            self.valid_xyxy[ann_id] = (
+                x1, y1, x2, y2
             )
 
-
-            if cat_id not in (
-                self.cat2label
-            ):
-                continue
-
-
-            label = (
-                self.cat2label[
-                    cat_id
-                ]
-            )
-
-
-            self.class_to_ann_ids[
-                label
-            ].append(
+            self.class_to_ann_ids[0].append(
                 ann_id
             )
 
-
-            self.class_to_img_ids[
-                label
-            ].add(
-                ann["image_id"]
+            self.image_to_ann_ids.setdefault(
+                image_id,
+                []
+            ).append(
+                ann_id
             )
 
+        self.class_to_ann_ids[0].sort()
 
-        for label in (
-            self.class_to_img_ids
-        ):
+        self.class_to_img_ids = {
+            0: sorted(self.image_to_ann_ids)
+        }
 
-            self.class_to_img_ids[
-                label
-            ] = sorted(
-
-                self.class_to_img_ids[
-                    label
-                ]
+        self.image_positions = {
+            image_id: index
+            for index, image_id in enumerate(
+                self.class_to_img_ids[0]
             )
+        }
 
-
-        # At least 2 images:
-        # support image != query image.
-
-        self.valid_labels = [
-
-            label
-
-            for label in range(
-                len(self.cat_ids)
-            )
-
-            if (
-                len(
-                    self.class_to_ann_ids[
-                        label
-                    ]
-                ) > 0
-
-                and
-
-                len(
-                    self.class_to_img_ids[
-                        label
-                    ]
-                ) >= 2
-            )
-        ]
-
-
-        if (
-            len(self.valid_labels)
-            !=
-            COCO_CONFIG[
-                "num_classes"
-            ]
-        ):
-
+        if len(self.image_positions) < 2:
             raise RuntimeError(
-
-                "Not all 80 COCO classes "
-                "have valid episodic data. "
-                f"Found {len(self.valid_labels)}."
+                "Need at least two images with valid person annotations."
             )
-
-
-        # Cache used by absent-wrong-support sampling.
-
-        self._present_label_cache = {}
-
-
-    # ======================================================
-    # EPOCH
-    # ======================================================
-
-    def set_epoch(
-        self,
-        epoch
-    ):
-
-        self.epoch = int(epoch)
-
 
     def __len__(self):
-
         return self.num_episodes
 
+    def set_epoch(self, epoch):
+        self.epoch = int(epoch)
 
-    # ======================================================
-    # DETERMINISTIC RNG
-    # ======================================================
-
-    def _get_rng(
-        self,
-        index
-    ):
-
+    def _get_rng(self, index):
         episode_seed = (
-
             self.seed
-
-            +
-            self.epoch
-            *
-            self.num_episodes
-
-            +
-            int(index)
+            + self.epoch * self.num_episodes
+            + int(index)
         )
 
+        return random.Random(episode_seed)
 
-        return random.Random(
-            episode_seed
-        )
-
-
-    # ======================================================
-    # IMAGE LOAD
-    # ======================================================
-
-    def _load_image(
-        self,
-        image_id
-    ):
-
-        info = self.coco.loadImgs(
-            [int(image_id)]
-        )[0]
-
+    def _load_image(self, image_id):
+        info = self.coco.imgs[int(image_id)]
 
         image_path = os.path.join(
-
             self.image_dir,
-
             info["file_name"]
         )
 
+        with Image.open(image_path) as source:
+            image = source.convert("RGB")
 
-        image = Image.open(
-            image_path
-        ).convert(
-            "RGB"
+        expected_size = (
+            info["width"],
+            info["height"]
         )
 
+        if image.size != expected_size:
+            raise RuntimeError(
+                f"Image/annotation dimensions differ: {image_id}"
+            )
 
         return image, info
-
-
-    # ======================================================
-    # ALL SEMANTIC CLASSES PRESENT IN QUERY IMAGE
-    #
-    # Conservative:
-    # a class appearing anywhere in annotations is treated
-    # as present and cannot become a wrong support.
-    # ======================================================
-
-    def get_present_labels(
-        self,
-        image_id
-    ):
-
-        image_id = int(
-            image_id
-        )
-
-
-        if image_id in (
-            self._present_label_cache
-        ):
-
-            return set(
-
-                self._present_label_cache[
-                    image_id
-                ]
-            )
-
-
-        ann_ids = self.coco.getAnnIds(
-            imgIds=[image_id]
-        )
-
-
-        anns = self.coco.loadAnns(
-            ann_ids
-        )
-
-
-        present = set()
-
-
-        for ann in anns:
-
-            cat_id = ann.get(
-                "category_id"
-            )
-
-
-            if cat_id in (
-                self.cat2label
-            ):
-
-                present.add(
-
-                    int(
-                        self.cat2label[
-                            cat_id
-                        ]
-                    )
-                )
-
-
-        self._present_label_cache[
-            image_id
-        ] = tuple(
-            sorted(present)
-        )
-
-
-        return set(present)
-
-
-    # ======================================================
-    # SUPPORT OBJECT CROP
-    # ======================================================
 
     def _load_support(
         self,
         annotation_id,
-        class_label
+        class_label=0,
     ):
+        assert int(class_label) == 0
+
+        annotation_id = int(annotation_id)
 
         ann = self.coco.anns[
-            int(annotation_id)
+            annotation_id
         ]
-
 
         image_id = int(
             ann["image_id"]
         )
 
-
         image, _ = self._load_image(
             image_id
         )
 
+        x1, y1, x2, y2 = self.valid_xyxy[
+            annotation_id
+        ]
 
-        x, y, w, h = (
-            ann["bbox"]
-        )
+        crop = image.crop((
+            math.floor(x1),
+            math.floor(y1),
+            math.ceil(x2),
+            math.ceil(y2),
+        ))
 
-
-        x1 = max(
-            0,
-            int(
-                math.floor(x)
+        if self.support_transform is not None:
+            crop = self.support_transform(
+                crop
             )
-        )
-
-        y1 = max(
-            0,
-            int(
-                math.floor(y)
-            )
-        )
-
-        x2 = min(
-
-            image.width,
-
-            int(
-                math.ceil(
-                    x + w
-                )
-            )
-        )
-
-        y2 = min(
-
-            image.height,
-
-            int(
-                math.ceil(
-                    y + h
-                )
-            )
-        )
-
-
-        if (
-            x2 <= x1
-            or
-            y2 <= y1
-        ):
-
-            raise RuntimeError(
-                "Invalid support crop."
-            )
-
-
-        support_image = (
-            image.crop(
-                (
-                    x1,
-                    y1,
-                    x2,
-                    y2
-                )
-            )
-        )
-
-
-        if (
-            self.support_transform
-            is not None
-        ):
-
-            support_image = (
-                self.support_transform(
-                    support_image
-                )
-            )
-
 
         support_target = {
+            "boxes": torch.tensor(
+                [[0.5, 0.5, 1.0, 1.0]],
+                dtype=torch.float32
+            ),
 
-            "boxes":
-                torch.tensor(
+            "labels": torch.tensor(
+                [0],
+                dtype=torch.long
+            ),
 
-                    [[
-                        0.5,
-                        0.5,
-                        1.0,
-                        1.0
-                    ]],
+            "image_id": torch.tensor(
+                image_id,
+                dtype=torch.long
+            ),
 
-                    dtype=torch.float32
-                ),
-
-            "labels":
-                torch.tensor(
-
-                    [int(class_label)],
-
-                    dtype=torch.long
-                ),
-
-            "image_id":
-                torch.tensor(
-
-                    image_id,
-
-                    dtype=torch.long
-                ),
-
-            "annotation_id":
-                torch.tensor(
-
-                    int(annotation_id),
-
-                    dtype=torch.long
-                )
+            "annotation_id": torch.tensor(
+                annotation_id,
+                dtype=torch.long
+            ),
         }
 
-
-        return (
-            support_image,
-            support_target
-        )
-
-
-    # ======================================================
-    # QUERY FULL IMAGE
-    #
-    # ONLY episode-class objects become detection targets.
-    # ======================================================
+        return crop, support_target
 
     def _load_query(
         self,
         image_id,
-        class_label
+        class_label=0,
     ):
+        assert int(class_label) == 0
 
-        image, info = (
-            self._load_image(
-                image_id
-            )
+        image, info = self._load_image(
+            image_id
         )
 
-
-        img_w = float(
-            info["width"]
-        )
-
-        img_h = float(
-            info["height"]
-        )
-
-
-        cat_id = (
-            self.label2cat[
-                int(class_label)
-            ]
-        )
-
-
-        ann_ids = self.coco.getAnnIds(
-
-            imgIds=[
-                int(image_id)
-            ],
-
-            catIds=[
-                cat_id
-            ],
-
-            iscrowd=False
-        )
-
-
-        anns = self.coco.loadAnns(
-            ann_ids
-        )
-
+        width = float(info["width"])
+        height = float(info["height"])
 
         boxes = []
-        labels = []
 
+        for ann_id in self.image_to_ann_ids.get(
+            int(image_id),
+            []
+        ):
+            x1, y1, x2, y2 = self.valid_xyxy[
+                ann_id
+            ]
 
-        for ann in anns:
+            boxes.append([
+                (x1 + x2) / (2 * width),
+                (y1 + y2) / (2 * height),
+                (x2 - x1) / width,
+                (y2 - y1) / height,
+            ])
 
-            x, y, w, h = (
-                ann["bbox"]
-            )
+        target = {
+            "boxes": torch.tensor(
+                boxes,
+                dtype=torch.float32
+            ).reshape(-1, 4),
 
+            "labels": torch.zeros(
+                len(boxes),
+                dtype=torch.long
+            ),
 
-            if (
-                w < self.min_bbox_size
-                or
-                h < self.min_bbox_size
-            ):
-
-                continue
-
-
-            cx = (
-                x + w / 2.0
-            ) / img_w
-
-            cy = (
-                y + h / 2.0
-            ) / img_h
-
-            nw = w / img_w
-            nh = h / img_h
-
-
-            boxes.append(
-                [
-                    cx,
-                    cy,
-                    nw,
-                    nh
-                ]
-            )
-
-
-            labels.append(
-                int(class_label)
-            )
-
-
-        if len(boxes) == 0:
-
-            raise RuntimeError(
-
-                "Selected query contains "
-                "no valid episode-class object."
-            )
-
-
-        query_target = {
-
-            "boxes":
-                torch.tensor(
-                    boxes,
-                    dtype=torch.float32
-                ),
-
-            "labels":
-                torch.tensor(
-                    labels,
-                    dtype=torch.long
-                ),
-
-            "image_id":
-                torch.tensor(
-                    int(image_id),
-                    dtype=torch.long
-                )
+            "image_id": torch.tensor(
+                int(image_id),
+                dtype=torch.long
+            ),
         }
 
-
-        if (
-            self.query_transform
-            is not None
-        ):
-
-            image = (
-                self.query_transform(
-                    image
-                )
+        if self.query_transform is not None:
+            image = self.query_transform(
+                image
             )
 
+        return image, target
 
-        return (
-            image,
-            query_target
+    def __getitem__(self, index):
+        if not 0 <= int(index) < len(self):
+            raise IndexError(index)
+
+        rng = self._get_rng(index)
+
+        ann_id = rng.choice(
+            self.class_to_ann_ids[0]
         )
 
-
-    # ======================================================
-    # ONE 1-WAY EPISODE
-    # ======================================================
-
-    def __getitem__(
-        self,
-        index
-    ):
-
-        rng = self._get_rng(
-            index
+        support_id = int(
+            self.coco.anns[ann_id]["image_id"]
         )
 
-
-        # --------------------------------------------------
-        # Balanced cyclic class assignment.
-        #
-        # Every consecutive 80 episodes covers
-        # every COCO class exactly once.
-        # --------------------------------------------------
-
-        class_position = (
-
-            int(index)
-            +
-            self.epoch
-
-        ) % len(
-            self.valid_labels
-        )
-
-
-        class_label = int(
-
-            self.valid_labels[
-                class_position
-            ]
-        )
-
-
-        # --------------------------------------------------
-        # Support
-        # --------------------------------------------------
-
-        support_ann_id = rng.choice(
-
-            self.class_to_ann_ids[
-                class_label
-            ]
-        )
-
-
-        support_image_id = int(
-
-            self.coco.anns[
-                support_ann_id
-            ][
-                "image_id"
-            ]
-        )
-
-
-        # --------------------------------------------------
-        # Query must be a DIFFERENT image.
-        # --------------------------------------------------
-
-        query_candidates = [
-
-            image_id
-
-            for image_id
-            in self.class_to_img_ids[
-                class_label
-            ]
-
-            if int(image_id)
-            !=
-            support_image_id
+        # Pilih query image berbeda tanpa membuat ulang
+        # daftar seluruh kandidat pada setiap episode.
+        support_position = self.image_positions[
+            support_id
         ]
 
-
-        if not query_candidates:
-
-            raise RuntimeError(
-                "No independent query image."
-            )
-
-
-        query_image_id = int(
-
-            rng.choice(
-                query_candidates
-            )
+        query_position = rng.randrange(
+            len(self.image_positions) - 1
         )
 
+        if query_position >= support_position:
+            query_position += 1
 
-        (
-            support_image,
-            support_target
-        ) = self._load_support(
+        query_id = self.class_to_img_ids[0][
+            query_position
+        ]
 
-            support_ann_id,
-            class_label
+        support_image, support_target = self._load_support(
+            ann_id
         )
 
-
-        (
-            query_image,
-            query_target
-        ) = self._load_query(
-
-            query_image_id,
-            class_label
+        query_image, query_target = self._load_query(
+            query_id
         )
-
 
         return {
+            "episode_class": torch.tensor(
+                0,
+                dtype=torch.long
+            ),
 
-            "episode_class":
-                torch.tensor(
-                    class_label,
-                    dtype=torch.long
-                ),
+            "support_image": support_image,
+            "support_target": support_target,
 
-            "support_image":
-                support_image,
-
-            "support_target":
-                support_target,
-
-            "query_image":
-                query_image,
-
-            "query_target":
-                query_target
+            "query_image": query_image,
+            "query_target": query_target,
         }
 
 
-# ==========================================================
-# TRAIN DATASET
-# ==========================================================
-
 train_dataset = COCOEpisodeDataset(
-
-    coco=
-        coco_train,
-
-    image_dir=
-        TRAIN_IMAGE_DIR,
-
-    support_transform=
-        support_transform,
-
-    query_transform=
-        query_transform,
-
-    num_episodes=
-        COCO_CONFIG[
-            "num_train_episodes"
-        ],
-
-    seed=
-        COCO_CONFIG[
-            "seed"
-        ],
-
-    min_bbox_size=
-        COCO_CONFIG[
-            "min_bbox_size"
-        ]
+    coco=coco_train,
+    image_dir=TRAIN_IMAGE_DIR,
+    support_transform=support_transform,
+    query_transform=query_transform,
+    num_episodes=COCO_CONFIG["num_train_episodes"],
+    seed=COCO_CONFIG["seed"],
+    min_bbox_size=COCO_CONFIG["min_bbox_size"],
 )
 
-
 print("=" * 70)
-print("STEP 16 : COCO EPISODIC DATASET READY")
+print("STEP 16: PERSON DATASET READY")
 print("=" * 70)
 
 print(
-    "Train Episodes:",
+    "Person images:",
+    len(train_dataset.class_to_img_ids[0])
+)
+
+print(
+    "Eligible person instances:",
+    len(train_dataset.class_to_ann_ids[0])
+)
+
+print(
+    "Training episodes:",
     len(train_dataset)
-)
-
-print(
-    "Valid Classes :",
-    len(
-        train_dataset.valid_labels
-    )
 )
 
 print("=" * 70)
