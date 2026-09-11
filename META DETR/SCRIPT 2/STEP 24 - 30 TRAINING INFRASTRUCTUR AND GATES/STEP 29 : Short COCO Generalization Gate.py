@@ -1,715 +1,218 @@
 # ==========================================================
-# STEP 29 : Short COCO Generalization Gate
+# STEP 29: Short COCO-Person Generalization
 #
-# 5 epochs × 800 steps
-# fixed unseen COCO-Val
-#
-# Starts from official fresh `model`.
+# Dijalankan hanya jika tiny learning lolos.
+# Dimulai dari inisialisasi awal, bukan bobot tiny training.
 # ==========================================================
 
-print("=" * 70)
-print("STEP 29 : SHORT COCO GENERALIZATION GATE")
-print("=" * 70)
-
-
-assert TINY_GATE_PASSED, (
-    "STEP 28 must pass first."
-)
-
-
-# ==========================================================
-# FRESH MODEL
-# ==========================================================
-
-short_model = copy.deepcopy(
-
-    model
-
-).to(
-    CONFIG["device"]
-)
-
-
-(
-    short_optimizer,
-    short_scheduler
-) = build_optimizer_and_scheduler(
-    short_model
-)
-
-
-# ==========================================================
-# BASELINE
-# ==========================================================
-
-print()
-print(
-    "Running fresh-model COCO-Val baseline..."
-)
-
-
-short_baseline_metrics = (
-    evaluate_episodic_model(
-
-        model=
-            short_model,
-
-        data_loader=
-            val_loader,
-
-        criterion=
-            criterion,
-
-        device=
-            CONFIG["device"],
-
-        score_threshold=
-            TRAIN_CONFIG[
-                "score_threshold"
-            ],
-
-        iou_threshold=
-            TRAIN_CONFIG[
-                "iou_threshold"
-            ],
-
-        show_progress=True
-    )
-)
-
-
-print()
-print("-" * 70)
-print("SHORT BASELINE")
-print("-" * 70)
-
-print(
-    f"Val Loss      : "
-    f"{short_baseline_metrics['loss']:.6f}"
-)
-
-print(
-    f"mAP50         : "
-    f"{short_baseline_metrics['episodic_map50']:.8f}"
-)
-
-print(
-    f"Mean Best IoU : "
-    f"{short_baseline_metrics['mean_best_iou']:.6f}"
-)
-
-print(
-    f"Loc R@0.50    : "
-    f"{short_baseline_metrics['localization_recall50']:.6f}"
-)
-
-print("-" * 70)
-
-
-# ==========================================================
-# BEST STATE
-# ==========================================================
-
+SHORT_GATE_PASSED = False
 short_history = []
 
-short_best_state = None
-
-short_best_epoch = -1
-
-short_best_map50 = -1.0
-
-short_best_val_loss = float(
-    "inf"
-)
-
-short_best_metrics = None
-
-
-# ==========================================================
-# TRAIN
-# ==========================================================
-
-for epoch in range(
-
-    TRAIN_CONFIG[
-        "short_epochs"
-    ]
-):
-
-    # Different reproducible episodes each epoch.
-
-    train_dataset.set_epoch(
-        epoch
-    )
-
-
-    short_model.train()
-
-
-    freeze_backbone_bn_statistics(
-        short_model.backbone
-    )
-
-
-    running_detection = 0.0
-    running_rank = 0.0
-    running_combined = 0.0
-
-    running_correct_sim = 0.0
-    running_wrong_sim = 0.0
-    running_margin = 0.0
-
-    actual_steps = 0
-
-
-    progress = tqdm(
-
-        train_loader,
-
-        desc=(
-            f"SHORT "
-            f"[{epoch+1}/"
-            f"{TRAIN_CONFIG['short_epochs']}]"
-        )
-    )
-
-
-    for batch in progress:
-
-        if (
-            actual_steps
-            >=
-            TRAIN_CONFIG[
-                "short_steps_per_epoch"
-            ]
-        ):
-
-            break
-
-
-        result = (
-            compute_combined_training_loss(
-
-                target_model=
-                    short_model,
-
-                batch=
-                    batch,
-
-                dataset=
-                    train_dataset,
-
-                epoch=
-                    epoch,
-
-                step=
-                    actual_steps,
-
-                device=
-                    CONFIG["device"]
-            )
-        )
-
-
-        loss = (
-            result[
-                "combined_loss"
-            ]
-        )
-
-
-        short_optimizer.zero_grad(
-            set_to_none=True
-        )
-
-
-        loss.backward()
-
-
-        torch.nn.utils.clip_grad_norm_(
-
-            short_model.parameters(),
-
-            max_norm=
-                TRAIN_CONFIG[
-                    "gradient_clip"
-                ]
-        )
-
-
-        short_optimizer.step()
-
-
-        detection_value = float(
-
-            result[
-                "detection_losses"
-            ][
-                "loss_total"
-            ].item()
-        )
-
-
-        rank_value = float(
-
-            result[
-                "support_rank_loss"
-            ].item()
-        )
-
-
-        stats = (
-            result[
-                "support_rank_stats"
-            ]
-        )
-
-
-        running_detection += (
-            detection_value
-        )
-
-        running_rank += (
-            rank_value
-        )
-
-        running_combined += float(
-            loss.item()
-        )
-
-        running_correct_sim += (
-            stats[
-                "correct_similarity"
-            ]
-        )
-
-        running_wrong_sim += (
-            stats[
-                "wrong_similarity"
-            ]
-        )
-
-        running_margin += (
-            stats[
-                "observed_margin"
-            ]
-        )
-
-
-        actual_steps += 1
-
-
-        progress.set_postfix({
-
-            "Det":
-                f"{detection_value:.3f}",
-
-            "Rank":
-                f"{rank_value:.3f}",
-
-            "Margin":
-                (
-                    f"{stats['observed_margin']:.3f}"
-                ),
-
-            "Step":
-                (
-                    f"{actual_steps}/"
-                    f"{TRAIN_CONFIG['short_steps_per_epoch']}"
-                )
-        })
-
-
-    if actual_steps == 0:
-
-        raise RuntimeError(
-            "Short training completed zero steps."
-        )
-
-
-    # ======================================================
-    # FIXED UNSEEN COCO-VAL
-    # ======================================================
-
-    print()
+if not TINY_GATE_PASSED:
     print(
-        "Running fixed unseen COCO-Val..."
+        "STEP 29 SKIPPED: "
+        "diagnose tiny learning in Step 30 first."
     )
-
-
-    val_metrics = (
-        evaluate_episodic_model(
-
-            model=
-                short_model,
-
-            data_loader=
-                val_loader,
-
-            criterion=
-                criterion,
-
-            device=
-                CONFIG["device"],
-
-            score_threshold=
-                TRAIN_CONFIG[
-                    "score_threshold"
-                ],
-
-            iou_threshold=
-                TRAIN_CONFIG[
-                    "iou_threshold"
-                ],
-
-            show_progress=True
-        )
-    )
-
-
-    record = {
-
-        "epoch":
-            epoch + 1,
-
-        "detection_loss":
-            running_detection
-            /
-            actual_steps,
-
-        "support_rank_loss":
-            running_rank
-            /
-            actual_steps,
-
-        "combined_loss":
-            running_combined
-            /
-            actual_steps,
-
-        "correct_similarity":
-            running_correct_sim
-            /
-            actual_steps,
-
-        "wrong_similarity":
-            running_wrong_sim
-            /
-            actual_steps,
-
-        "train_margin":
-            running_margin
-            /
-            actual_steps,
-
-        **val_metrics,
-    }
-
-
-    short_history.append(
-        record
-    )
-
-
-    # ======================================================
-    # BEST MODEL
-    # primary = mAP50
-    # tie-break = val loss
-    # ======================================================
-
-    is_better = (
-
-        record[
-            "episodic_map50"
-        ]
-        >
-        short_best_map50
-
-        or
-
-        (
-            abs(
-                record[
-                    "episodic_map50"
-                ]
-                -
-                short_best_map50
-            )
-            <
-            1e-12
-
-            and
-
-            record[
-                "loss"
-            ]
-            <
-            short_best_val_loss
-        )
-    )
-
-
-    if is_better:
-
-        short_best_epoch = (
-            epoch + 1
-        )
-
-        short_best_map50 = float(
-
-            record[
-                "episodic_map50"
-            ]
-        )
-
-        short_best_val_loss = float(
-
-            record[
-                "loss"
-            ]
-        )
-
-        short_best_metrics = dict(
-            record
-        )
-
-
-        short_best_state = {
-
-            name:
-                tensor
-                .detach()
-                .cpu()
-                .clone()
-
-            for name, tensor
-            in short_model
-            .state_dict()
-            .items()
-        }
-
-
-    # ======================================================
-    # REPORT
-    # ======================================================
-
-    print()
-    print("=" * 70)
-
-    print(
-        f"SHORT EPOCH "
-        f"{epoch+1}/"
-        f"{TRAIN_CONFIG['short_epochs']}"
-    )
-
-    print("-" * 70)
-
-    print(
-        f"Detection Loss : "
-        f"{record['detection_loss']:.4f}"
-    )
-
-    print(
-        f"Support Rank   : "
-        f"{record['support_rank_loss']:.6f}"
-    )
-
-    print(
-        f"Combined Loss  : "
-        f"{record['combined_loss']:.4f}"
-    )
-
-    print("-" * 70)
-
-    print(
-        f"Correct Sim    : "
-        f"{record['correct_similarity']:.6f}"
-    )
-
-    print(
-        f"Wrong Sim      : "
-        f"{record['wrong_similarity']:.6f}"
-    )
-
-    print(
-        f"Train Margin   : "
-        f"{record['train_margin']:.6f}"
-    )
-
-    print("-" * 70)
-
-    print(
-        f"Val Loss       : "
-        f"{record['loss']:.4f}"
-    )
-
-    print(
-        f"Val mAP50      : "
-        f"{record['episodic_map50']:.8f}"
-    )
-
-    print(
-        f"Val P@0.50     : "
-        f"{record['precision50']:.6f}"
-    )
-
-    print(
-        f"Val R@0.50     : "
-        f"{record['recall50']:.6f}"
-    )
-
-    print(
-        f"Mean Best IoU  : "
-        f"{record['mean_best_iou']:.6f}"
-    )
-
-    print(
-        f"Loc Recall@.30 : "
-        f"{record['localization_recall30']:.6f}"
-    )
-
-    print(
-        f"Loc Recall@.50 : "
-        f"{record['localization_recall50']:.6f}"
-    )
-
-    print("=" * 70)
-
-
-    short_scheduler.step()
-
-
-# ==========================================================
-# RESTORE BEST SHORT MODEL
-# ==========================================================
-
-assert short_best_state is not None
-
-
-short_model.load_state_dict(
-    short_best_state
-)
-
-
-short_model.to(
-    CONFIG["device"]
-)
-
-
-short_model.eval()
-
-
-# ==========================================================
-# GATE DECISION
-# ==========================================================
-
-required_map50 = max(
-
-    TRAIN_CONFIG[
-        "short_map50_absolute_floor"
-    ],
-
-    short_baseline_metrics[
-        "episodic_map50"
-    ]
-
-    *
-
-    TRAIN_CONFIG[
-        "short_map50_relative_factor"
-    ]
-)
-
-
-SHORT_GATE_PASSED = bool(
-
-    short_best_map50
-    >=
-    required_map50
-)
-
-
-print()
-print("=" * 70)
-print("STEP 29 : SHORT GENERALIZATION RESULT")
-print("=" * 70)
-
-print(
-    f"Baseline mAP50 : "
-    f"{short_baseline_metrics['episodic_map50']:.8f}"
-)
-
-print(
-    f"Required mAP50 : "
-    f"{required_map50:.8f}"
-)
-
-print(
-    f"Best Epoch     : "
-    f"{short_best_epoch}"
-)
-
-print(
-    f"Best Val Loss  : "
-    f"{short_best_val_loss:.6f}"
-)
-
-print(
-    f"Best mAP50     : "
-    f"{short_best_map50:.8f}"
-)
-
-print(
-    f"Best Mean IoU  : "
-    f"{short_best_metrics['mean_best_iou']:.6f}"
-)
-
-print(
-    f"Best Loc R@.50 : "
-    f"{short_best_metrics['localization_recall50']:.6f}"
-)
-
-print("-" * 70)
-
-
-if SHORT_GATE_PASSED:
-
-    print(
-        "✓ STEP 29 SHORT GENERALIZATION GATE PASSED"
-    )
-
-    print(
-        "→ STEP 30 is SKIPPED by protocol."
-    )
-
-    print(
-        "→ Next later: STEP 31 Official COCO Meta-Training."
-    )
-
 
 else:
+    short_model = make_trial_model()
 
-    print(
-        "✗ STEP 29 SHORT GENERALIZATION GATE FAILED"
+    short_optimizer, short_scheduler = (
+        build_optimizer_and_scheduler(
+            short_model
+        )
     )
 
-    print(
-        "→ DO NOT RUN official 25-epoch training."
+    short_baseline_metrics = evaluate_person(
+        short_model,
+        val_loader
     )
 
-    print(
-        "→ RUN STEP 30 H1/H2/H3 diagnosis."
+    print_person_metrics(
+        "SHORT INITIAL",
+        short_baseline_metrics
     )
 
+    short_best_state = None
+    short_best_metrics = None
+    short_best_epoch = -1
 
-print("=" * 70)
+    for epoch in range(
+        TRAIN_CONFIG["short_epochs"]
+    ):
+        train_dataset.set_epoch(
+            epoch
+        )
 
-print(
-    "✓ short_model restored to BEST short epoch"
-)
+        train_stats = train_detection_epoch(
+            target_model=short_model,
+            loader=train_loader,
+            optimizer=short_optimizer,
+            max_steps=TRAIN_CONFIG[
+                "short_steps_per_epoch"
+            ],
+            description=f"PERSON SHORT {epoch + 1}",
+        )
 
-print(
-    "✓ official model remains untouched"
-)
+        metrics = evaluate_person(
+            short_model,
+            val_loader
+        )
 
-print("=" * 70)
+        short_history.append({
+            "epoch": epoch + 1,
+            "train": train_stats,
+            "validation": metrics,
+        })
+
+        print_person_metrics(
+            f"SHORT {epoch + 1}",
+            metrics
+        )
+
+        is_better = (
+            short_best_metrics is None
+            or
+            (
+                metrics["person_ap50"],
+                -metrics["loss"]
+            )
+            >
+            (
+                short_best_metrics["person_ap50"],
+                -short_best_metrics["loss"]
+            )
+        )
+
+        if is_better:
+            short_best_metrics = dict(
+                metrics
+            )
+
+            short_best_epoch = epoch + 1
+
+            short_best_state = {
+                key: (
+                    value
+                    .detach()
+                    .cpu()
+                    .clone()
+                )
+                for key, value in short_model.state_dict().items()
+            }
+
+        short_scheduler.step()
+
+    short_model.load_state_dict(
+        short_best_state
+    )
+
+    short_model.eval()
+
+    required_ap = max(
+        TRAIN_CONFIG[
+            "short_map50_absolute_floor"
+        ],
+
+        (
+            short_baseline_metrics["person_ap50"]
+            *
+            TRAIN_CONFIG[
+                "short_map50_relative_factor"
+            ]
+        ),
+    )
+
+    good_epochs = sum(
+        (
+            record["validation"]["person_ap50"]
+            >= required_ap
+        )
+        for record in short_history
+    )
+
+    last_epoch_passed = (
+        short_history[-1]["validation"]["person_ap50"]
+        >= required_ap
+    )
+
+    SHORT_GATE_PASSED = bool(
+        (
+            good_epochs
+            >= TRAIN_CONFIG[
+                "short_min_epochs_above_floor"
+            ]
+        )
+        and last_epoch_passed
+    )
+
+    print("=" * 70)
+    print("STEP 29: SHORT TRAINING RESULT")
+    print("=" * 70)
+
+    print("Best epoch       :", short_best_epoch)
+    print("Required AP      :", required_ap)
+    print("Qualifying epochs:", good_epochs)
+    print("Last epoch passed:", last_epoch_passed)
+    print("SHORT_GATE_PASSED:", SHORT_GATE_PASSED)
+
+    print_person_metrics(
+        "BEST SHORT MODEL",
+        short_best_metrics
+    )
+
+    # Checkpoint diagnosis saja.
+    # Belum merupakan hasil full source training.
+    checkpoint_config = {
+        key: (
+            str(value)
+            if key == "device"
+            else value
+        )
+        for key, value in CONFIG.items()
+    }
+
+    torch.save(
+        {
+            "model": short_best_state,
+            "stage": "short_person_diagnostic",
+            "epoch": short_best_epoch,
+            "metrics": short_best_metrics,
+            "config": checkpoint_config,
+            "train_config": TRAIN_CONFIG,
+            "person_category_id": PERSON_CAT_ID,
+        },
+        os.path.join(
+            CHECKPOINT_DIR,
+            "person_short_diagnostic_best.pth"
+        )
+    )
+
+    with open(
+        os.path.join(
+            LOG_DIR,
+            "short_person_history.json"
+        ),
+        "w"
+    ) as handle:
+        json.dump(
+            short_history,
+            handle,
+            indent=2
+        )
+
+    short_model.cpu()
+
+    del short_optimizer
+    del short_scheduler
+    del short_best_state
+
+    gc.collect()
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    print(
+        "Step 30 will inspect the best short model. "
+        "Full source training and CCTV adaptation are not included yet."
+    )
