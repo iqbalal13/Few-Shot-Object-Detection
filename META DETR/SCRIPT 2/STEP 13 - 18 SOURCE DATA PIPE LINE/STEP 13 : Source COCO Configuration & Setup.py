@@ -1,535 +1,360 @@
 # ==========================================================
-# STEP 13 : Source COCO Configuration & Setup
-# ROBUST DOWNLOAD VERSION
+# STEP 13: COCO Source Setup — Person Only
 # ==========================================================
 
 import os
 import sys
+import time
 import zipfile
 import subprocess
-import shutil
+import urllib.request
+import urllib.error
+import http.client
 
-import torch
-
-
-# ==========================================================
-# DEPENDENCY CHECK
-# ==========================================================
-
-assert "CONFIG" in globals(), (
-    "Run STEP 3 first."
-)
-
-assert "COCO_DIR" in globals(), (
-    "Run STEP 2 first."
-)
-
-
-# ==========================================================
-# SOURCE CONFIGURATION
-# ==========================================================
+assert "CONFIG" in globals(), "Jalankan STEP 3 terlebih dahulu."
+assert "COCO_DIR" in globals(), "Jalankan STEP 2 terlebih dahulu."
+assert "torch" in globals(), "Jalankan STEP 1 terlebih dahulu."
 
 COCO_CONFIG = {
-
-    "num_classes":
-        80,
-
-    "episode_way":
-        1,
-
-    "support_shot":
-        1,
-
-    "num_train_episodes":
-        8000,
-
-    "num_val_episodes":
-        800,
-
-    "image_size":
-        CONFIG["image_size"],
-
-    "min_bbox_size":
-        2.0,
-
-    "batch_size":
-        1,
-
-    "shuffle":
-        False,
-
-    "num_workers":
-        2,
-
-    "pin_memory":
-        torch.cuda.is_available(),
-
-    "seed":
-        CONFIG["seed"],
-
-    "train_images":
-        "train2017",
-
-    "val_images":
-        "val2017",
-
-    "train_annotation":
-        "annotations/instances_train2017.json",
-
-    "val_annotation":
-        "annotations/instances_val2017.json",
+    "num_classes": 1,
+    "episode_way": 1,
+    "support_shot": 1,
+    "num_train_episodes": 8000,
+    "num_val_episodes": 800,
+    "image_size": CONFIG["image_size"],
+    "min_bbox_size": 2.0,
+    "batch_size": 1,
+    "num_workers": 2,
+    "pin_memory": torch.cuda.is_available(),
+    "seed": CONFIG["seed"],
+    "train_images": "train2017",
+    "val_images": "val2017",
+    "train_annotation": "annotations/instances_train2017.json",
+    "val_annotation": "annotations/instances_val2017.json",
 }
 
-
-assert COCO_CONFIG["num_classes"] == 80
-assert COCO_CONFIG["episode_way"] == 1
-assert COCO_CONFIG["support_shot"] == 1
-assert COCO_CONFIG["batch_size"] == 1
-assert COCO_CONFIG["shuffle"] is False
-assert COCO_CONFIG["num_val_episodes"] % 80 == 0
-
-
-# ==========================================================
-# POSSIBLE COCO ROOTS
-# ==========================================================
-
-LEGACY_COCO_ROOT = (
-    "/content/datasets/coco"
+# Akses bucket COCO melalui hostname HTTPS Amazon S3.
+COCO_DOWNLOAD_BASES = (
+    "https://s3.us-east-1.amazonaws.com/images.cocodataset.org/",
+    "https://s3.amazonaws.com/images.cocodataset.org/",
 )
+
+COCO_ASSETS = (
+    ("zips/train2017.zip", "train2017", 118287),
+    ("zips/val2017.zip", "val2017", 5000),
+    ("annotations/annotations_trainval2017.zip", None, None),
+)
+
+
+def count_coco_images(folder):
+    if not os.path.isdir(folder):
+        return 0
+
+    with os.scandir(folder) as entries:
+        return sum(
+            entry.is_file()
+            and entry.name.lower().endswith(".jpg")
+            and entry.stat().st_size > 0
+            for entry in entries
+        )
+
+
+def coco_asset_is_complete(root, asset):
+    _, folder, expected_count = asset
+
+    if folder is not None:
+        return (
+            count_coco_images(os.path.join(root, folder))
+            >= expected_count
+        )
+
+    return all(
+        os.path.isfile(os.path.join(root, COCO_CONFIG[key]))
+        and os.path.getsize(os.path.join(root, COCO_CONFIG[key])) > 0
+        for key in ("train_annotation", "val_annotation")
+    )
 
 
 def coco_root_is_complete(root):
-
-    required = [
-
-        os.path.join(
-            root,
-            COCO_CONFIG["train_images"]
-        ),
-
-        os.path.join(
-            root,
-            COCO_CONFIG["val_images"]
-        ),
-
-        os.path.join(
-            root,
-            COCO_CONFIG["train_annotation"]
-        ),
-
-        os.path.join(
-            root,
-            COCO_CONFIG["val_annotation"]
-        ),
-    ]
-
     return all(
-        os.path.exists(path)
-        for path in required
+        coco_asset_is_complete(root, asset)
+        for asset in COCO_ASSETS
     )
 
 
-# ==========================================================
-# CHOOSE ROOT
-# ==========================================================
+def download_coco_zip(relative_url, archive_path):
+    if zipfile.is_zipfile(archive_path):
+        print(
+            "Menggunakan ZIP yang tersedia:",
+            os.path.basename(archive_path),
+        )
+        return
 
-if coco_root_is_complete(
-    COCO_DIR
-):
+    part_path = archive_path + ".part"
 
-    COCO_ROOT = COCO_DIR
+    if zipfile.is_zipfile(part_path):
+        os.replace(part_path, archive_path)
+        return
 
-    print(
-        "✓ Using clean-project COCO."
-    )
+    last_error = None
 
+    for base_url in COCO_DOWNLOAD_BASES:
+        url = base_url + relative_url
 
-elif coco_root_is_complete(
-    LEGACY_COCO_ROOT
-):
+        for attempt in range(1, 4):
+            offset = (
+                os.path.getsize(part_path)
+                if os.path.isfile(part_path)
+                else 0
+            )
 
-    COCO_ROOT = (
-        LEGACY_COCO_ROOT
-    )
+            headers = {
+                "User-Agent": "COCO-Notebook/1.0",
+            }
 
-    print(
-        "✓ Reusing existing /content/datasets/coco."
-    )
+            if offset:
+                headers["Range"] = f"bytes={offset}-"
 
+            print(
+                f"\nUnduh {relative_url} "
+                f"| percobaan {attempt}/3"
+            )
+            print("URL:", url)
 
-else:
+            request = urllib.request.Request(
+                url,
+                headers=headers,
+            )
 
-    # Use legacy-style runtime path.
-    # This keeps dataset separate from model/checkpoint project.
-    COCO_ROOT = (
-        LEGACY_COCO_ROOT
-    )
+            try:
+                with urllib.request.urlopen(
+                    request,
+                    timeout=60,
+                ) as response:
+                    status = response.getcode()
 
-    os.makedirs(
-        COCO_ROOT,
-        exist_ok=True
-    )
+                    if status == 206:
+                        content_range = response.headers.get(
+                            "Content-Range",
+                            "",
+                        )
 
+                        if not content_range.startswith(
+                            f"bytes {offset}-"
+                        ):
+                            raise RuntimeError(
+                                "Posisi resume dari server tidak cocok."
+                            )
 
-    # ======================================================
-    # COCO DOWNLOAD URLS
-    #
-    # Use HTTP first because the current runtime has
-    # SSL certificate mismatch with the HTTPS COCO endpoint.
-    # ======================================================
+                        mode = "ab" if offset else "wb"
 
-    downloads = {
+                    elif status == 200:
+                        # Server mengirim file dari awal.
+                        offset = 0
+                        mode = "wb"
 
-        "train2017.zip":
-            (
-                "http://images.cocodataset.org/"
-                "zips/train2017.zip"
-            ),
+                    else:
+                        raise RuntimeError(
+                            f"Respons HTTP tidak sesuai: {status}"
+                        )
 
-        "val2017.zip":
-            (
-                "http://images.cocodataset.org/"
-                "zips/val2017.zip"
-            ),
+                    length = response.headers.get(
+                        "Content-Length"
+                    )
 
-        "annotations_trainval2017.zip":
-            (
-                "http://images.cocodataset.org/"
-                "annotations/"
-                "annotations_trainval2017.zip"
-            ),
-    }
+                    expected_bytes = (
+                        int(length)
+                        if length
+                        else None
+                    )
 
+                    received = 0
+                    last_report = time.monotonic()
 
-    markers = {
+                    with open(part_path, mode) as output_file:
+                        while True:
+                            chunk = response.read(
+                                4 * 1024 * 1024
+                            )
 
-        "train2017.zip":
-            os.path.join(
-                COCO_ROOT,
-                "train2017"
-            ),
+                            if not chunk:
+                                break
 
-        "val2017.zip":
-            os.path.join(
-                COCO_ROOT,
-                "val2017"
-            ),
+                            output_file.write(chunk)
+                            received += len(chunk)
 
-        "annotations_trainval2017.zip":
-            os.path.join(
-                COCO_ROOT,
-                "annotations",
-                "instances_train2017.json"
-            ),
-    }
+                            if time.monotonic() - last_report >= 5:
+                                downloaded_gib = (
+                                    offset + received
+                                ) / (1024 ** 3)
 
+                                print(
+                                    "\rTerunduh: "
+                                    f"{downloaded_gib:.2f} GiB",
+                                    end="",
+                                    flush=True,
+                                )
 
-    # ======================================================
-    # DOWNLOAD HELPER
-    # ======================================================
+                                last_report = time.monotonic()
 
-    def download_with_wget(
-        url,
-        output_path
-    ):
+                    print()
 
-        # Remove partial/corrupt previous download.
-        if os.path.exists(
-            output_path
-        ):
+                    if (
+                        expected_bytes is not None
+                        and received != expected_bytes
+                    ):
+                        raise http.client.IncompleteRead(
+                            b"",
+                            expected_bytes - received,
+                        )
 
-            if not zipfile.is_zipfile(
-                output_path
-            ):
+                if not zipfile.is_zipfile(part_path):
+                    os.remove(part_path)
+
+                    raise zipfile.BadZipFile(
+                        "Hasil unduhan bukan ZIP yang lengkap."
+                    )
+
+                os.replace(part_path, archive_path)
+                return
+
+            except urllib.error.HTTPError as error:
+                last_error = error
+
+                if (
+                    error.code == 416
+                    and os.path.isfile(part_path)
+                ):
+                    os.remove(part_path)
 
                 print(
-                    "Removing incomplete ZIP:",
-                    output_path
+                    f"HTTP {error.code}: {error.reason}"
                 )
 
-                os.remove(
-                    output_path
-                )
-
-
-        # Already valid.
-        if (
-            os.path.exists(
-                output_path
-            )
-            and
-            zipfile.is_zipfile(
-                output_path
-            )
-        ):
-
-            print(
-                "✓ Valid ZIP already exists"
-            )
-
-            return
-
-
-        print(
-            "Downloading..."
-        )
-
-
-        normal_cmd = [
-
-            "wget",
-
-            "-c",
-
-            "-O",
-            output_path,
-
-            url
-        ]
-
-
-        result = subprocess.run(
-            normal_cmd
-        )
-
-
-        # --------------------------------------------------
-        # Runtime-specific SSL fallback.
-        #
-        # Only used if normal wget fails.
-        # --------------------------------------------------
-
-        if result.returncode != 0:
-
-            print(
-                "Normal download failed."
-            )
-
-            print(
-                "Retrying COCO download "
-                "with certificate check disabled..."
-            )
-
-
-            if os.path.exists(
-                output_path
-            ):
-
-                os.remove(
-                    output_path
-                )
-
-
-            fallback_cmd = [
-
-                "wget",
-
-                "--no-check-certificate",
-
-                "-c",
-
-                "-O",
-                output_path,
-
-                url
-            ]
-
-
-            subprocess.run(
-
-                fallback_cmd,
-
-                check=True
-            )
-
-
-        # --------------------------------------------------
-        # Validate downloaded ZIP
-        # --------------------------------------------------
-
-        if not zipfile.is_zipfile(
-            output_path
-        ):
-
-            raise RuntimeError(
-
-                "Downloaded file is not a valid ZIP: "
-                f"{output_path}"
-            )
-
-
-        print(
-            "✓ Download finished and ZIP verified"
-        )
-
-
-    # ======================================================
-    # DOWNLOAD + EXTRACT
-    # ======================================================
-
-    for (
-        filename,
-        url
-    ) in downloads.items():
-
-        print("-" * 70)
-
-        print(
-            filename
-        )
-
-
-        marker = (
-            markers[
-                filename
-            ]
-        )
-
-
-        if os.path.exists(
-            marker
-        ):
-
-            print(
-                "✓ Already extracted"
-            )
-
-            continue
-
-
-        zip_path = os.path.join(
-            COCO_ROOT,
-            filename
-        )
-
-
-        download_with_wget(
-
-            url,
-            zip_path
-        )
-
-
-        print(
-            "Extracting..."
-        )
-
-
-        with zipfile.ZipFile(
-
-            zip_path,
-
-            "r"
-
-        ) as archive:
-
-            archive.extractall(
-                COCO_ROOT
-            )
-
-
-        print(
-            "✓ Extraction finished"
-        )
-
-
-        # Remove ZIP after successful extraction
-        # to save Colab disk space.
-
-        os.remove(
-            zip_path
-        )
+            except (
+                urllib.error.URLError,
+                TimeoutError,
+                ConnectionError,
+                http.client.HTTPException,
+                zipfile.BadZipFile,
+            ) as error:
+                last_error = error
+                print("Unduhan terhenti:", error)
+
+    raise RuntimeError(
+        f"Gagal mengunduh {relative_url}: {last_error}"
+    ) from last_error
 
 
 # ==========================================================
-# REQUIRED PATHS
+# PILIH LOKASI DATASET
+# ==========================================================
+
+candidates = list(dict.fromkeys([
+    COCO_DIR,
+    globals().get("COCO_ROOT", COCO_DIR),
+    "/content/datasets/coco",
+    "/content/MetaDETR_Final_Clean/datasets/coco",
+]))
+
+COCO_ROOT = next(
+    (
+        root
+        for root in candidates
+        if coco_root_is_complete(root)
+    ),
+    COCO_DIR,
+)
+
+os.makedirs(COCO_ROOT, exist_ok=True)
+
+print("COCO root:", COCO_ROOT)
+
+
+# ==========================================================
+# DOWNLOAD DAN EKSTRAK BAGIAN YANG BELUM LENGKAP
+# ==========================================================
+
+for asset in COCO_ASSETS:
+    relative_url, _, _ = asset
+    filename = os.path.basename(relative_url)
+
+    if coco_asset_is_complete(COCO_ROOT, asset):
+        print("Sudah tersedia:", filename)
+        continue
+
+    archive_path = os.path.join(
+        COCO_ROOT,
+        filename,
+    )
+
+    download_coco_zip(
+        relative_url,
+        archive_path,
+    )
+
+    print("Mengekstrak:", filename)
+
+    root_abs = os.path.realpath(COCO_ROOT)
+
+    with zipfile.ZipFile(archive_path) as archive:
+        for member in archive.infolist():
+            destination = os.path.realpath(
+                os.path.join(
+                    root_abs,
+                    member.filename,
+                )
+            )
+
+            if os.path.commonpath(
+                [root_abs, destination]
+            ) != root_abs:
+                raise RuntimeError(
+                    "Path ZIP tidak valid: "
+                    + member.filename
+                )
+
+        # Pembacaan saat ekstraksi sekaligus memeriksa
+        # CRC tiap file ZIP.
+        archive.extractall(root_abs)
+
+    if not coco_asset_is_complete(COCO_ROOT, asset):
+        raise RuntimeError(
+            f"Hasil ekstraksi {filename} belum lengkap."
+        )
+
+    os.remove(archive_path)
+
+    print("Ekstraksi selesai:", filename)
+
+
+# ==========================================================
+# VARIABEL UNTUK STEP 14 DAN SETERUSNYA
 # ==========================================================
 
 TRAIN_IMAGE_DIR = os.path.join(
-
     COCO_ROOT,
-
-    COCO_CONFIG[
-        "train_images"
-    ]
+    COCO_CONFIG["train_images"],
 )
-
 
 VAL_IMAGE_DIR = os.path.join(
-
     COCO_ROOT,
-
-    COCO_CONFIG[
-        "val_images"
-    ]
+    COCO_CONFIG["val_images"],
 )
-
 
 TRAIN_ANN_PATH = os.path.join(
-
     COCO_ROOT,
-
-    COCO_CONFIG[
-        "train_annotation"
-    ]
+    COCO_CONFIG["train_annotation"],
 )
-
 
 VAL_ANN_PATH = os.path.join(
-
     COCO_ROOT,
-
-    COCO_CONFIG[
-        "val_annotation"
-    ]
+    COCO_CONFIG["val_annotation"],
 )
 
-
-required_paths = {
-
-    "Train Images":
-        TRAIN_IMAGE_DIR,
-
-    "Val Images":
-        VAL_IMAGE_DIR,
-
-    "Train Annotation":
-        TRAIN_ANN_PATH,
-
-    "Val Annotation":
-        VAL_ANN_PATH,
-}
-
-
-# ==========================================================
-# VERIFY STRUCTURE
-# ==========================================================
-
-print("=" * 70)
-print("VERIFYING COCO STRUCTURE")
-print("=" * 70)
-
-
-for (
-    name,
-    path
-) in required_paths.items():
-
-    exists = os.path.exists(
-        path
-    )
-
-
-    print(
-
-        f"{name:20s}: "
-        f"{'✓ FOUND' if exists else '✗ MISSING'}"
-    )
-
-
-    assert exists, (
-        f"{name} missing: {path}"
-    )
+assert coco_root_is_complete(COCO_ROOT), (
+    "Dataset COCO belum lengkap."
+)
 
 
 # ==========================================================
@@ -537,68 +362,59 @@ for (
 # ==========================================================
 
 try:
-
     from pycocotools.coco import COCO
 
 except ImportError:
-
     subprocess.check_call([
-
         sys.executable,
-
         "-m",
         "pip",
         "install",
         "-q",
-        "pycocotools"
+        "pycocotools",
     ])
-
 
     from pycocotools.coco import COCO
 
 
+# ==========================================================
+# RINGKASAN
+# ==========================================================
+
 print("=" * 70)
-print("STEP 13 : SOURCE COCO SETUP READY")
+print("STEP 13: COCO READY")
 print("=" * 70)
 
+print("COCO root          :", COCO_ROOT)
+
 print(
-    "COCO Root          :",
-    COCO_ROOT
+    "Training classes   :",
+    "person only; filter pada STEP 14 dan 16",
 )
 
 print(
-    "Train Episodes     :",
-    COCO_CONFIG[
-        "num_train_episodes"
-    ]
+    "Support per episode:",
+    COCO_CONFIG["support_shot"],
 )
 
 print(
-    "Validation Episodes:",
-    COCO_CONFIG[
-        "num_val_episodes"
-    ]
+    "Train episodes     :",
+    COCO_CONFIG["num_train_episodes"],
 )
 
 print(
-    "Classes            :",
-    COCO_CONFIG[
-        "num_classes"
-    ]
+    "Validation episodes:",
+    COCO_CONFIG["num_val_episodes"],
 )
 
 print(
-    "Episode Way        :",
-    COCO_CONFIG[
-        "episode_way"
-    ]
+    "Train images       :",
+    count_coco_images(TRAIN_IMAGE_DIR),
 )
 
 print(
-    "Support Shot       :",
-    COCO_CONFIG[
-        "support_shot"
-    ]
+    "Validation images  :",
+    count_coco_images(VAL_IMAGE_DIR),
 )
 
 print("=" * 70)
