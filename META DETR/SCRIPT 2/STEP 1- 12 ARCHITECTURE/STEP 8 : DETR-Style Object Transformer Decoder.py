@@ -1,18 +1,13 @@
 # ==========================================================
 # STEP 8 : DETR-Style Object Transformer Decoder
 #
+# FINAL:
 # - 100 learned object-query positions
-# - NO support conditioning here
+# - 6 decoder layers
+# - NO support conditioning inside decoder
 #
-# Self-attention:
-# Q,K = tgt + object_query_pos
-#
-# Cross-attention:
-# Q = tgt + object_query_pos
-# K = memory + spatial_pos
-# V = memory
+# Support conditioning occurs later in STEP 9.
 # ==========================================================
-
 
 class DETRTransformerDecoderLayer(
     nn.Module
@@ -20,113 +15,78 @@ class DETRTransformerDecoderLayer(
 
     def __init__(
         self,
-        hidden_dim=
-            CONFIG[
-                "hidden_dim"
-            ],
-        num_heads=
-            CONFIG[
-                "num_heads"
-            ],
-        dim_feedforward=
-            CONFIG[
-                "dim_feedforward"
-            ],
-        dropout=
-            CONFIG[
-                "dropout"
-            ]
+        hidden_dim=CONFIG[
+            "hidden_dim"
+        ],
+        num_heads=CONFIG[
+            "num_heads"
+        ],
+        dim_feedforward=CONFIG[
+            "dim_feedforward"
+        ],
+        dropout=CONFIG[
+            "dropout"
+        ],
     ):
         super().__init__()
 
-
         self.self_attn = (
             nn.MultiheadAttention(
-
-                embed_dim=
-                    hidden_dim,
-
-                num_heads=
-                    num_heads,
-
-                dropout=
-                    dropout,
-
-                batch_first=True
+                embed_dim=hidden_dim,
+                num_heads=num_heads,
+                dropout=dropout,
+                batch_first=True,
             )
         )
-
 
         self.cross_attn = (
             nn.MultiheadAttention(
-
-                embed_dim=
-                    hidden_dim,
-
-                num_heads=
-                    num_heads,
-
-                dropout=
-                    dropout,
-
-                batch_first=True
+                embed_dim=hidden_dim,
+                num_heads=num_heads,
+                dropout=dropout,
+                batch_first=True,
             )
         )
 
-
         self.linear1 = nn.Linear(
-
             hidden_dim,
-
             dim_feedforward
         )
 
-
         self.linear2 = nn.Linear(
-
             dim_feedforward,
-
             hidden_dim
         )
-
 
         self.dropout = nn.Dropout(
             dropout
         )
 
-
         self.dropout1 = nn.Dropout(
             dropout
         )
-
 
         self.dropout2 = nn.Dropout(
             dropout
         )
 
-
         self.dropout3 = nn.Dropout(
             dropout
         )
-
 
         self.norm1 = nn.LayerNorm(
             hidden_dim
         )
 
-
         self.norm2 = nn.LayerNorm(
             hidden_dim
         )
-
 
         self.norm3 = nn.LayerNorm(
             hidden_dim
         )
 
-
         self.activation = nn.ReLU()
-
 
     @staticmethod
     def with_pos_embed(
@@ -139,7 +99,6 @@ class DETRTransformerDecoderLayer(
 
         return tensor + pos
 
-
     def forward(
         self,
         tgt,
@@ -150,7 +109,7 @@ class DETRTransformerDecoderLayer(
     ):
 
         # --------------------------------------------------
-        # SELF ATTENTION
+        # OBJECT-QUERY SELF ATTENTION
         # --------------------------------------------------
 
         q = self.with_pos_embed(
@@ -163,21 +122,14 @@ class DETRTransformerDecoderLayer(
             query_pos
         )
 
-
         tgt2 = self.self_attn(
-
             query=q,
-
             key=k,
-
             value=tgt,
-
-            need_weights=False
+            need_weights=False,
         )[0]
 
-
         tgt = (
-
             tgt
             +
             self.dropout1(
@@ -185,14 +137,12 @@ class DETRTransformerDecoderLayer(
             )
         )
 
-
         tgt = self.norm1(
             tgt
         )
 
-
         # --------------------------------------------------
-        # CROSS ATTENTION
+        # QUERY -> IMAGE CROSS ATTENTION
         # --------------------------------------------------
 
         q = self.with_pos_embed(
@@ -200,30 +150,21 @@ class DETRTransformerDecoderLayer(
             query_pos
         )
 
-
         k = self.with_pos_embed(
             memory,
             memory_pos
         )
 
-
         tgt2 = self.cross_attn(
-
             query=q,
-
             key=k,
-
             value=memory,
-
             key_padding_mask=
                 memory_key_padding_mask,
-
-            need_weights=False
+            need_weights=False,
         )[0]
 
-
         tgt = (
-
             tgt
             +
             self.dropout2(
@@ -231,22 +172,17 @@ class DETRTransformerDecoderLayer(
             )
         )
 
-
         tgt = self.norm2(
             tgt
         )
 
-
         # --------------------------------------------------
-        # FFN
+        # FEED-FORWARD
         # --------------------------------------------------
 
         tgt2 = self.linear2(
-
             self.dropout(
-
                 self.activation(
-
                     self.linear1(
                         tgt
                     )
@@ -254,9 +190,7 @@ class DETRTransformerDecoderLayer(
             )
         )
 
-
         tgt = (
-
             tgt
             +
             self.dropout3(
@@ -264,80 +198,66 @@ class DETRTransformerDecoderLayer(
             )
         )
 
-
         tgt = self.norm3(
             tgt
         )
 
-
         return tgt
 
 
-# ==========================================================
-# FULL DECODER
-# ==========================================================
-
-class DETRObjectDecoder(nn.Module):
+class DETRObjectDecoder(
+    nn.Module
+):
 
     def __init__(
         self,
-        hidden_dim=
-            CONFIG[
-                "hidden_dim"
-            ],
-        num_queries=
-            CONFIG[
-                "num_queries"
-            ],
-        num_layers=
-            CONFIG[
-                "num_decoder_layers"
-            ]
+        hidden_dim=CONFIG[
+            "hidden_dim"
+        ],
+        num_queries=CONFIG[
+            "num_queries"
+        ],
+        num_layers=CONFIG[
+            "num_decoder_layers"
+        ],
     ):
         super().__init__()
 
+        if num_layers != 6:
+            raise ValueError(
+                "Final architecture requires "
+                "exactly 6 decoder layers."
+            )
 
         self.num_queries = (
-            num_queries
+            int(num_queries)
         )
-
-
-        # Learned positional embeddings
-        # for DETR object queries.
 
         self.object_queries = (
             nn.Embedding(
-
                 num_queries,
-
                 hidden_dim
             )
         )
-
 
         base_layer = (
             DETRTransformerDecoderLayer()
         )
 
-
         self.layers = nn.ModuleList([
-
             copy.deepcopy(
                 base_layer
             )
-
             for _ in range(
                 num_layers
             )
         ])
-
 
         self.final_norm = (
             nn.LayerNorm(
                 hidden_dim
             )
         )
-
 
     def forward(
         self,
@@ -348,14 +268,10 @@ class DETRObjectDecoder(nn.Module):
 
         B = memory.shape[0]
 
-
         query_pos = (
-
             self.object_queries
             .weight
-
             .unsqueeze(0)
-
             .expand(
                 B,
                 -1,
@@ -363,44 +279,29 @@ class DETRObjectDecoder(nn.Module):
             )
         )
 
-
-        # DETR target/object content
-        # begins at zero.
-
+        # DETR object content starts at zero.
         tgt = torch.zeros_like(
             query_pos
         )
 
-
         for layer in self.layers:
 
             tgt = layer(
-
-                tgt=
-                    tgt,
-
-                memory=
-                    memory,
-
-                memory_pos=
-                    memory_pos,
-
-                query_pos=
-                    query_pos,
-
+                tgt=tgt,
+                memory=memory,
+                memory_pos=memory_pos,
+                query_pos=query_pos,
                 memory_key_padding_mask=
-                    memory_key_padding_mask
+                    memory_key_padding_mask,
             )
-
 
         tgt = self.final_norm(
             tgt
         )
 
-
         return tgt
 
 
 print("=" * 70)
-print("STEP 8 : DETR OBJECT DECODER DEFINED")
+print("STEP 8 : 6-LAYER DETR OBJECT DECODER DEFINED")
 print("=" * 70)
