@@ -1,6 +1,6 @@
 # ==========================================================
-# STEP 1 : Import Libraries & Reproducibility
-# FINAL CLEAN NOTEBOOK
+# STEP 1 : Imports & Reproducibility
+# SIMPLIFIED META-DETR — FINAL PIPELINE
 # ==========================================================
 
 import os
@@ -19,7 +19,7 @@ import torchvision
 
 from torchvision.models import (
     resnet101,
-    ResNet101_Weights
+    ResNet101_Weights,
 )
 
 
@@ -39,6 +39,8 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed_all(SEED)
 
 
+# Deterministic setup.
+# benchmark=False supaya hasil lebih reproducible.
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
