@@ -1,210 +1,239 @@
 # ==========================================================
 # STEP 3 : Final Model Configuration
-# FINAL CLEAN ARCHITECTURE — LOCKED
+#
+# LOCKED ARCHITECTURE
+#
+# ResNet-101
+# Support Prototype Encoder
+# Query Feature Encoder
+# Transformer Encoder : 3
+# Transformer Decoder : 6
+# Object Queries       : 100
+# Residual Support-Object Relation
+# Support-Conditioned Binary Detection Head
 # ==========================================================
 
 CONFIG = {
 
-    # ------------------------------------------------------
-    # Reproducibility / device
-    # ------------------------------------------------------
-
-    "seed":
-        SEED,
-
-    "device":
-        DEVICE,
-
+    "seed": SEED,
+    "device": DEVICE,
 
     # ------------------------------------------------------
-    # Input / Backbone
+    # INPUT / BACKBONE
     # ------------------------------------------------------
 
-    "image_size":
-        640,
+    "image_size": 640,
 
-    "backbone":
-        "resnet101",
+    "backbone": "resnet101",
 
-    "backbone_out_channels":
-        2048,
+    "backbone_out_channels": 2048,
 
-    "backbone_pretrained":
-        True,
-
+    "backbone_pretrained": True,
 
     # ------------------------------------------------------
-    # Transformer
+    # TRANSFORMER
+    #
+    # 3 encoder layers dipilih berdasarkan diagnosis
+    # notebook lama / STEP 34.
     # ------------------------------------------------------
 
-    "hidden_dim":
-        256,
+    "hidden_dim": 256,
 
-    "num_queries":
-        100,
+    "num_queries": 100,
 
-    "num_heads":
-        8,
+    "num_heads": 8,
 
-    "num_encoder_layers":
-        6,
+    "num_encoder_layers": 3,
 
-    "num_decoder_layers":
-        6,
+    "num_decoder_layers": 6,
 
-    "dim_feedforward":
-        2048,
+    "dim_feedforward": 2048,
 
-    "dropout":
-        0.1,
-
+    # STEP 34 menggunakan no-dropout dan memberikan
+    # hasil terbaik dari diagnosis sebelumnya.
+    "dropout": 0.0,
 
     # ------------------------------------------------------
-    # Positional Encoding
+    # POSITIONAL ENCODING
     # ------------------------------------------------------
 
-    "position_embedding":
-        "sine_2d",
+    "position_embedding": "sine_2d",
 
-    "position_temperature":
-        10000,
+    "position_temperature": 10000,
 
-    "position_normalize":
-        True,
+    "position_normalize": True,
 
-    "position_scale":
-        2.0 * math.pi,
-
+    "position_scale": (
+        2.0 * math.pi
+    ),
 
     # ------------------------------------------------------
-    # Support Prototype
+    # SUPPORT PROTOTYPE
     # ------------------------------------------------------
 
-    "support_hidden_dim":
-        512,
-
+    "support_hidden_dim": 512,
 
     # ------------------------------------------------------
-    # Support-Object Relation
+    # SUPPORT-OBJECT RELATION
     # ------------------------------------------------------
 
-    "relation_hidden_dim":
-        512,
+    "relation_hidden_dim": 512,
 
-    "relation_output_dim":
-        256,
-
+    "relation_output_dim": 256,
 
     # ------------------------------------------------------
-    # Explicit support classifier
+    # SUPPORT-CONDITIONED BINARY CLASSIFIER
+    #
+    # One logit per query:
+    #
+    # object matches support category
+    # vs
+    # background / no-object
     # ------------------------------------------------------
 
-    "foreground_prior_prob":
-        0.05,
+    "foreground_prior_prob": 0.05,
 
-    "initial_logit_scale":
-        5.0,
-
+    "initial_logit_scale": 5.0,
 
     # ------------------------------------------------------
-    # Detection loss — locked for later steps
+    # SOURCE META-TRAINING
     # ------------------------------------------------------
 
-    "focal_alpha":
-        0.25,
+    "source_num_categories": 80,
 
-    "focal_gamma":
-        2.0,
+    "source_episode_way": 1,
 
-    "loss_bbox_weight":
-        5.0,
-
-    "loss_giou_weight":
-        2.0,
-
+    "source_support_shot": 1,
 
     # ------------------------------------------------------
-    # Hungarian Matcher — locked
+    # TARGET CCTV
     # ------------------------------------------------------
 
-    "matcher_class_cost":
-        1.0,
+    "target_category": "person",
 
-    "matcher_bbox_cost":
-        5.0,
-
-    "matcher_giou_cost":
-        2.0,
-
+    "target_shots": [1, 3, 5],
 
     # ------------------------------------------------------
-    # Matched-query support ranking
+    # DETECTION LOSS
     # ------------------------------------------------------
 
-    "support_rank_margin":
-        0.10,
+    "focal_alpha": 0.25,
 
-    "support_rank_weight":
-        1.0,
+    "focal_gamma": 2.0,
+
+    "loss_bbox_weight": 5.0,
+
+    "loss_giou_weight": 2.0,
+
+    # ------------------------------------------------------
+    # HUNGARIAN MATCHER
+    # ------------------------------------------------------
+
+    "matcher_class_cost": 1.0,
+
+    "matcher_bbox_cost": 5.0,
+
+    "matcher_giou_cost": 2.0,
 }
 
 
 # ==========================================================
-# BASIC CONFIG ASSERTIONS
+# CONFIGURATION CHECKS
 # ==========================================================
 
-assert CONFIG["hidden_dim"] % 2 == 0
+assert (
+    CONFIG["hidden_dim"] % 4 == 0
+)
 
 assert (
     CONFIG["hidden_dim"]
-    %
-    CONFIG["num_heads"]
-    ==
-    0
+    % CONFIG["num_heads"]
+    == 0
 )
 
 assert (
     CONFIG["relation_output_dim"]
-    ==
+    == CONFIG["hidden_dim"]
+)
+
+assert (
+    CONFIG["num_encoder_layers"]
+    == 3
+)
+
+assert (
+    CONFIG["num_decoder_layers"]
+    == 6
+)
+
+assert (
+    CONFIG["source_num_categories"]
+    == 80
+)
+
+
+print("=" * 70)
+print("STEP 3 : FINAL MODEL CONFIGURATION READY")
+print("=" * 70)
+
+print(
+    "Backbone        :",
+    CONFIG["backbone"]
+)
+
+print(
+    "Input size      :",
+    CONFIG["image_size"]
+)
+
+print(
+    "Hidden dim      :",
     CONFIG["hidden_dim"]
 )
 
-
-print("=" * 70)
-print("STEP 3 : FINAL MODEL CONFIGURATION")
-print("=" * 70)
-
-print("Backbone        :", CONFIG["backbone"])
-print("Input Size      :", CONFIG["image_size"])
-print("Hidden Dim      :", CONFIG["hidden_dim"])
-print("Object Queries  :", CONFIG["num_queries"])
 print(
-    "Encoder Layers  :",
+    "Object queries  :",
+    CONFIG["num_queries"]
+)
+
+print(
+    "Encoder layers  :",
     CONFIG["num_encoder_layers"]
 )
+
 print(
-    "Decoder Layers  :",
+    "Decoder layers  :",
     CONFIG["num_decoder_layers"]
 )
-print("Attention Heads :", CONFIG["num_heads"])
-print("FFN Dim         :", CONFIG["dim_feedforward"])
-print("Dropout         :", CONFIG["dropout"])
-
-print("-" * 70)
 
 print(
-    "Position        :",
-    CONFIG["position_embedding"]
+    "Attention heads :",
+    CONFIG["num_heads"]
 )
 
 print(
-    "Foreground Prior:",
-    CONFIG["foreground_prior_prob"]
+    "FFN dim         :",
+    CONFIG["dim_feedforward"]
 )
 
 print(
-    "Initial Scale   :",
-    CONFIG["initial_logit_scale"]
+    "Dropout         :",
+    CONFIG["dropout"]
+)
+
+print(
+    "Source classes  :",
+    CONFIG["source_num_categories"]
+)
+
+print(
+    "Episode way     :",
+    CONFIG["source_episode_way"]
+)
+
+print(
+    "Support shot    :",
+    CONFIG["source_support_shot"]
 )
 
 print("=" * 70)
