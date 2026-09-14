@@ -2,35 +2,29 @@
 # STEP 4 : Shared ResNet-101 Backbone
 # ==========================================================
 
-class SharedResNet101Backbone(nn.Module):
+class SharedResNet101Backbone(
+    nn.Module
+):
 
     def __init__(self):
         super().__init__()
 
-
         weights = (
-
             ResNet101_Weights.DEFAULT
-
             if CONFIG[
                 "backbone_pretrained"
             ]
-
             else None
         )
-
 
         resnet = resnet101(
             weights=weights
         )
 
-
-        # --------------------------------------------------
         # Keep convolutional backbone only.
         #
         # Output:
         # [B, 2048, H/32, W/32]
-        # --------------------------------------------------
 
         self.body = nn.Sequential(
 
@@ -42,22 +36,29 @@ class SharedResNet101Backbone(nn.Module):
             resnet.layer1,
             resnet.layer2,
             resnet.layer3,
-            resnet.layer4
+            resnet.layer4,
         )
 
-
-        self.out_channels = 2048
-
+        self.out_channels = (
+            CONFIG[
+                "backbone_out_channels"
+            ]
+        )
 
     def forward(self, x):
 
         if x.dim() != 4:
-
             raise ValueError(
-                "Backbone expects [B,3,H,W], "
-                f"got {x.shape}"
+                "Backbone expects "
+                "[B,3,H,W], "
+                f"got {tuple(x.shape)}"
             )
 
+        if x.shape[1] != 3:
+            raise ValueError(
+                "Backbone expects RGB input "
+                "with 3 channels."
+            )
 
         return self.body(x)
 
