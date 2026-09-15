@@ -1,10 +1,10 @@
 # ==========================================================
 # STEP 21 : Detection Criterion
 #
-# Ldet =
-#   focal
-#   + 5 * L1
-#   + 2 * GIoU
+# L =
+# focal
+# + 5 * L1
+# + 2 * GIoU
 # ==========================================================
 
 from torchvision.ops import (
@@ -19,25 +19,21 @@ class DetectionCriterion(
     def __init__(
         self,
         matcher,
-        focal_alpha=
-            CONFIG[
-                "focal_alpha"
-            ],
-        focal_gamma=
-            CONFIG[
-                "focal_gamma"
-            ],
-        bbox_weight=
-            CONFIG[
-                "loss_bbox_weight"
-            ],
-        giou_weight=
-            CONFIG[
-                "loss_giou_weight"
-            ]
+        focal_alpha=CONFIG[
+            "focal_alpha"
+        ],
+        focal_gamma=CONFIG[
+            "focal_gamma"
+        ],
+        bbox_weight=CONFIG[
+            "loss_bbox_weight"
+        ],
+        giou_weight=CONFIG[
+            "loss_giou_weight"
+        ],
     ):
-        super().__init__()
 
+        super().__init__()
 
         self.matcher = matcher
 
@@ -56,7 +52,6 @@ class DetectionCriterion(
         self.giou_weight = float(
             giou_weight
         )
-
 
     def forward(
         self,
@@ -77,34 +72,27 @@ class DetectionCriterion(
             ]
         )
 
-
         if (
             pred_logits.ndim != 3
             or
             pred_logits.shape[-1] != 1
         ):
-
             raise ValueError(
-                "Criterion expects logits [B,Q,1]."
+                "Criterion expects "
+                "logits [B,Q,1]."
             )
-
-
-        # --------------------------------------------------
-        # Match only once if caller already has indices.
-        # --------------------------------------------------
 
         if indices is None:
 
-            indices = self.matcher(
-                outputs,
-                targets
+            indices = (
+                self.matcher(
+                    outputs,
+                    targets
+                )
             )
 
-
         # --------------------------------------------------
-        # Binary foreground target:
-        # unmatched = 0
-        # matched   = 1
+        # Binary foreground targets
         # --------------------------------------------------
 
         target_foreground = (
@@ -113,48 +101,45 @@ class DetectionCriterion(
             )
         )
 
-
-        for b, (
-            src_idx,
+        for batch_index, (
+            source_indices,
             _
         ) in enumerate(
             indices
         ):
 
-            if len(src_idx) > 0:
+            if len(
+                source_indices
+            ) > 0:
 
                 target_foreground[
-                    b,
-                    src_idx,
-                    0
+                    batch_index,
+                    source_indices,
+                    0,
                 ] = 1.0
 
-
         num_target_boxes = sum(
-
             len(
                 target[
                     "boxes"
                 ]
             )
-
             for target
             in targets
         )
 
-
         num_target_boxes = max(
-            int(num_target_boxes),
+            int(
+                num_target_boxes
+            ),
             1
         )
 
-
         # --------------------------------------------------
-        # Focal
+        # Classification
         # --------------------------------------------------
 
         loss_cls = (
-
             sigmoid_focal_loss(
 
                 inputs=
@@ -169,100 +154,82 @@ class DetectionCriterion(
                 gamma=
                     self.focal_gamma,
 
-                reduction="sum"
-            )
+                reduction="sum",
 
+            )
             /
             float(
                 num_target_boxes
             )
         )
 
+        # --------------------------------------------------
+        # Matched boxes
+        # --------------------------------------------------
 
         matched_pred_boxes = []
+
         matched_target_boxes = []
 
+        for batch_index, (
+            source_indices,
+            target_indices
 
-        for b, (
-            src_idx,
-            tgt_idx
         ) in enumerate(
             indices
         ):
 
-            if len(src_idx) == 0:
+            if len(
+                source_indices
+            ) == 0:
                 continue
 
-
             matched_pred_boxes.append(
-
                 pred_boxes[
-                    b,
-                    src_idx
+                    batch_index,
+                    source_indices,
                 ]
             )
-
 
             matched_target_boxes.append(
-
-                targets[b][
+                targets[
+                    batch_index
+                ][
                     "boxes"
                 ][
-                    tgt_idx
+                    target_indices
                 ]
             )
-
 
         if matched_pred_boxes:
 
-            src_boxes = torch.cat(
-
+            source_boxes = torch.cat(
                 matched_pred_boxes,
-
                 dim=0
             )
-
 
             target_boxes = torch.cat(
-
                 matched_target_boxes,
-
                 dim=0
             )
 
-
-            # ----------------------------------------------
-            # L1
-            # ----------------------------------------------
-
             loss_bbox = (
-
                 F.l1_loss(
-
-                    src_boxes,
-
+                    source_boxes,
                     target_boxes,
-
-                    reduction="none"
+                    reduction="none",
                 ).sum()
-
                 /
                 float(
                     num_target_boxes
                 )
             )
 
-
-            # ----------------------------------------------
-            # GIoU
-            # ----------------------------------------------
-
-            src_xyxy = (
+            source_xyxy = (
                 box_cxcywh_to_xyxy(
-                    src_boxes
+                    source_boxes
                 )
             )
-
 
             target_xyxy = (
                 box_cxcywh_to_xyxy(
@@ -270,36 +237,30 @@ class DetectionCriterion(
                 )
             )
 
-
             giou_matrix = (
                 generalized_box_iou(
-
-                    src_xyxy,
-
+                    source_xyxy,
                     target_xyxy
                 )
             )
 
-
-            matched_giou = torch.diag(
-                giou_matrix
+            matched_giou = (
+                torch.diag(
+                    giou_matrix
+                )
             )
 
-
             loss_giou = (
-
                 (
                     1.0
                     -
                     matched_giou
                 ).sum()
-
                 /
                 float(
                     num_target_boxes
                 )
             )
-
 
         else:
 
@@ -312,7 +273,6 @@ class DetectionCriterion(
             loss_bbox = zero
 
             loss_giou = zero
-
 
         loss_total = (
 
@@ -331,7 +291,6 @@ class DetectionCriterion(
             loss_giou
         )
 
-
         return {
 
             "loss_cls":
@@ -344,16 +303,16 @@ class DetectionCriterion(
                 loss_giou,
 
             "loss_total":
-                loss_total
+                loss_total,
         }
 
 
 criterion = DetectionCriterion(
-
     matcher=matcher
-
 ).to(
-    CONFIG["device"]
+    CONFIG[
+        "device"
+    ]
 )
 
 
@@ -362,23 +321,9 @@ print("STEP 21 : DETECTION CRITERION READY")
 print("=" * 70)
 
 print(
-    "Focal alpha:",
-    CONFIG["focal_alpha"]
-)
-
-print(
-    "Focal gamma:",
-    CONFIG["focal_gamma"]
-)
-
-print(
-    "BBox weight:",
-    CONFIG["loss_bbox_weight"]
-)
-
-print(
-    "GIoU weight:",
-    CONFIG["loss_giou_weight"]
+    "Loss = focal "
+    "+ 5*L1 "
+    "+ 2*GIoU"
 )
 
 print("=" * 70)
