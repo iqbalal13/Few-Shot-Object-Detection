@@ -467,33 +467,9 @@ class COCOEpisodicDataset(Dataset):
             semantic_label
         )
 
-        ann = (
-            self.coco.anns[
-                annotation_id
-            ]
-        )
-
-        cat_id = int(
-            ann[
-                "category_id"
-            ]
-        )
-
-        expected_label = int(
-            self.cat_id_to_label[
-                cat_id
-            ]
-        )
-
-        if (
-            expected_label
-            != semantic_label
-        ):
-
-            raise RuntimeError(
-                "Support category/episode "
-                "label mismatch."
-            )
+        ann = self.coco.anns[
+            annotation_id
+        ]
 
         image_id = int(
             ann[
@@ -543,17 +519,34 @@ class COCOEpisodicDataset(Dataset):
                 "Invalid support crop."
             )
 
-        if (
-            self.support_transform
-            is not None
-        ):
-
-            crop = (
-                self
-                .support_transform(
-                    crop
-                )
+        if self.support_transform is None:
+            raise RuntimeError(
+                "Support transform is required "
+                "for fixed-size batching."
             )
+
+        transformed = (
+            self.support_transform(
+                crop
+            )
+        )
+
+        if not isinstance(
+            transformed,
+            dict
+        ):
+            raise TypeError(
+                "support_transform must return a dict "
+                "with image/padding_mask/meta."
+            )
+
+        support_image = transformed[
+            "image"
+        ]
+
+        support_padding_mask = transformed[
+            "padding_mask"
+        ]
 
         support_target = {
 
@@ -577,14 +570,24 @@ class COCOEpisodicDataset(Dataset):
 
             "category_id":
                 torch.tensor(
-                    cat_id,
+                    int(
+                        ann[
+                            "category_id"
+                        ]
+                    ),
                     dtype=torch.long
                 ),
+
+            "letterbox_meta":
+                transformed[
+                    "meta"
+                ],
         }
 
         return (
-            crop,
-            support_target
+            support_image,
+            support_padding_mask,
+            support_target,
         )
 
     # ======================================================
@@ -605,18 +608,10 @@ class COCOEpisodicDataset(Dataset):
             semantic_label
         )
 
-        image, info = (
+        image, _ = (
             self._load_image(
                 image_id
             )
-        )
-
-        width = float(
-            info["width"]
-        )
-
-        height = float(
-            info["height"]
         )
 
         ann_ids = (
@@ -631,11 +626,73 @@ class COCOEpisodicDataset(Dataset):
         )
 
         if not ann_ids:
-
             raise RuntimeError(
                 "Query image unexpectedly "
                 "contains no target instances."
             )
+
+        if self.query_transform is None:
+            raise RuntimeError(
+                "Query transform is required "
+                "for fixed-size batching."
+            )
+
+        transformed = (
+            self.query_transform(
+                image
+            )
+        )
+
+        if not isinstance(
+            transformed,
+            dict
+        ):
+            raise TypeError(
+                "query_transform must return a dict "
+                "with image/padding_mask/meta."
+            )
+
+        query_image = transformed[
+            "image"
+        ]
+
+        query_padding_mask = transformed[
+            "padding_mask"
+        ]
+
+        meta = transformed[
+            "meta"
+        ]
+
+        canvas_size = float(
+            meta[
+                "canvas_size"
+            ]
+        )
+
+        scale_x = float(
+            meta[
+                "scale_x"
+            ]
+        )
+
+        scale_y = float(
+            meta[
+                "scale_y"
+            ]
+        )
+
+        pad_left = float(
+            meta[
+                "pad_left"
+            ]
+        )
+
+        pad_top = float(
+            meta[
+                "pad_top"
+            ]
+        )
 
         boxes = []
 
@@ -651,39 +708,83 @@ class COCOEpisodicDataset(Dataset):
                 ann_id
             ]
 
+            # Original xyxy -> letterboxed xyxy.
+            x1_l = (
+                x1 * scale_x
+                + pad_left
+            )
+
+            x2_l = (
+                x2 * scale_x
+                + pad_left
+            )
+
+            y1_l = (
+                y1 * scale_y
+                + pad_top
+            )
+
+            y2_l = (
+                y2 * scale_y
+                + pad_top
+            )
+
+            # Clamp only for numerical safety.
+            x1_l = min(
+                max(x1_l, 0.0),
+                canvas_size
+            )
+
+            x2_l = min(
+                max(x2_l, 0.0),
+                canvas_size
+            )
+
+            y1_l = min(
+                max(y1_l, 0.0),
+                canvas_size
+            )
+
+            y2_l = min(
+                max(y2_l, 0.0),
+                canvas_size
+            )
+
+            width_l = max(
+                x2_l - x1_l,
+                1e-6
+            )
+
+            height_l = max(
+                y2_l - y1_l,
+                1e-6
+            )
+
             boxes.append(
                 [
                     (
-                        x1 + x2
+                        x1_l + x2_l
                     )
                     /
                     (
-                        2.0
-                        *
-                        width
+                        2.0 * canvas_size
                     ),
 
                     (
-                        y1 + y2
+                        y1_l + y2_l
                     )
                     /
                     (
-                        2.0
-                        *
-                        height
+                        2.0 * canvas_size
                     ),
 
-                    (
-                        x2 - x1
-                    )
+                    width_l
                     /
-                    width,
+                    canvas_size,
 
-                    (
-                        y2 - y1
-                    )
+                    height_l
                     /
-                    height,
+                    canvas_size,
                 ]
             )
 
@@ -710,11 +811,9 @@ class COCOEpisodicDataset(Dataset):
 
         target = {
 
-            "boxes":
-                boxes,
+            "boxes": boxes,
 
-            "labels":
-                labels,
+            "labels": labels,
 
             "image_id":
                 torch.tensor(
@@ -733,23 +832,14 @@ class COCOEpisodicDataset(Dataset):
                     cat_id,
                     dtype=torch.long
                 ),
+
+            "letterbox_meta": meta,
         }
 
-        if (
-            self.query_transform
-            is not None
-        ):
-
-            image = (
-                self
-                .query_transform(
-                    image
-                )
-            )
-
         return (
-            image,
-            target
+            query_image,
+            query_padding_mask,
+            target,
         )
 
     # ======================================================
@@ -857,18 +947,22 @@ class COCOEpisodicDataset(Dataset):
                 "Support/query leakage."
             )
 
-        support_image, support_target = (
-            self._load_support(
-                support_ann_id,
-                semantic_label
-            )
+        (
+            support_image,
+            support_padding_mask,
+            support_target,
+        ) = self._load_support(
+            support_ann_id,
+            semantic_label
         )
 
-        query_image, query_target = (
-            self._load_query(
-                query_image_id,
-                semantic_label
-            )
+        (
+            query_image,
+            query_padding_mask,
+            query_target,
+        ) = self._load_query(
+            query_image_id,
+            semantic_label
         )
 
         return {
@@ -882,11 +976,17 @@ class COCOEpisodicDataset(Dataset):
             "support_image":
                 support_image,
 
+            "support_padding_mask":
+                support_padding_mask,
+
             "support_target":
                 support_target,
 
             "query_image":
                 query_image,
+
+            "query_padding_mask":
+                query_padding_mask,
 
             "query_target":
                 query_target,
