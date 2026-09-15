@@ -66,7 +66,8 @@ class SimplifiedMetaDETR(
 
     def encode_support(
         self,
-        support_image
+        support_image,
+        support_padding_mask=None,
     ):
 
         support_feature_map = (
@@ -77,7 +78,9 @@ class SimplifiedMetaDETR(
 
         prototype = (
             self.support_encoder(
-                support_feature_map
+                support_feature_map,
+                padding_mask=
+                    support_padding_mask,
             )
         )
 
@@ -245,12 +248,15 @@ class SimplifiedMetaDETR(
         self,
         support_image,
         query_image,
-        query_padding_mask=None
+        support_padding_mask=None,
+        query_padding_mask=None,
     ):
 
         support_prototype = (
             self.encode_support(
-                support_image
+                support_image,
+                support_padding_mask=
+                    support_padding_mask,
             )
         )
 
@@ -294,7 +300,8 @@ class SimplifiedMetaDETR(
         self,
         support_image,
         query_image,
-        query_padding_mask=None
+        support_padding_mask=None,
+        query_padding_mask=None,
     ):
 
         outputs, _ = (
@@ -304,6 +311,9 @@ class SimplifiedMetaDETR(
 
                 query_image=
                     query_image,
+
+                support_padding_mask=
+                    support_padding_mask,
 
                 query_padding_mask=
                     query_padding_mask,
