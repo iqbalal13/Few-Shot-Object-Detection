@@ -1,5 +1,9 @@
 # ==========================================================
 # STEP 18 : Generic Episodic DataLoaders
+#
+# Physical batch remains 1.
+# Effective Stage-1 meta-batch becomes 4 through gradient
+# accumulation in STEP 24. Validation stays batch size 1.
 # ==========================================================
 
 from torch.utils.data import (
@@ -22,10 +26,26 @@ def episodic_collate_fn(
                 for item in batch
             ]),
 
+        "support_padding_masks":
+            torch.stack([
+                item[
+                    "support_padding_mask"
+                ]
+                for item in batch
+            ]),
+
         "query_images":
             torch.stack([
                 item[
                     "query_image"
+                ]
+                for item in batch
+            ]),
+
+        "query_padding_masks":
+            torch.stack([
+                item[
+                    "query_padding_mask"
                 ]
                 for item in batch
             ]),
@@ -82,24 +102,23 @@ def make_episode_loader(
 
         dataset,
 
-        batch_size=
-            int(
-                batch_size
-            ),
+        batch_size=int(
+            batch_size
+        ),
 
         # Episode class ordering is already
         # deterministically shuffled inside dataset.
         shuffle=False,
 
-        num_workers=
-            int(
-                num_workers
-            ),
+        num_workers=int(
+            num_workers
+        ),
 
-        pin_memory=
+        pin_memory=(
             COCO_CONFIG[
                 "pin_memory"
-            ],
+            ]
+        ),
 
         persistent_workers=False,
 
@@ -108,17 +127,14 @@ def make_episode_loader(
     )
 
 
-train_loader = (
-    make_episode_loader(
-        train_dataset
-    )
+train_loader = make_episode_loader(
+    train_dataset,
+    batch_size=1,
 )
 
-
-val_loader = (
-    make_episode_loader(
-        val_dataset
-    )
+val_loader = make_episode_loader(
+    val_dataset,
+    batch_size=1,
 )
 
 
@@ -149,6 +165,30 @@ assert (
 )
 
 assert (
+    _loader_batch[
+        "support_padding_masks"
+    ].ndim
+    ==
+    3
+)
+
+assert (
+    _loader_batch[
+        "query_padding_masks"
+    ].ndim
+    ==
+    3
+)
+
+assert (
+    _loader_batch[
+        "query_padding_masks"
+    ].dtype
+    ==
+    torch.bool
+)
+
+assert (
     len(
         _loader_batch[
             "query_targets"
@@ -162,30 +202,12 @@ assert (
 
 
 print("=" * 70)
-print("STEP 18 : EPISODIC DATALOADERS READY")
+print("STEP 18 : MASK-AWARE EPISODIC DATALOADERS READY")
 print("=" * 70)
-
-print(
-    "Train batches :",
-    len(
-        train_loader
-    )
-)
-
-print(
-    "Val batches   :",
-    len(
-        val_loader
-    )
-)
-
-print(
-    "Batch size    :",
-    COCO_CONFIG[
-        "batch_size"
-    ]
-)
-
+print("Train batches        :", len(train_loader))
+print("Val batches          :", len(val_loader))
+print("Physical batch size  :", 1)
+print("Effective Stage1 batch: set in STEP 24")
 print("=" * 70)
 
 
