@@ -1,48 +1,38 @@
 # ==========================================================
-# STEP 29 : Short COCO-80 Generalization Gate
+# STEP 29 : Short COCO-80 Stability + Generalization Gate
 #
 # Fresh model from original initialization.
-#
-# Train:
-#   COCO-Train episodic
-#
-# Evaluate:
-#   fixed COCO-Val episodic
-#
 # Tiny weights are NOT reused.
+#
+# PASS requires:
+# - genuine unseen AP50 improvement
+# - Precision/Recall become non-zero
+# - geometry improves
+# - last validation window retains >=80% of best AP50
 # ==========================================================
 
 if not TINY_GATE_PASSED:
-
     raise RuntimeError(
-        "STEP 28 tiny multi-class "
-        "learning gate failed. "
+        "STEP 28 tiny multi-class learning gate failed. "
         "Do not run generalization yet."
     )
 
+val_dataset.set_epoch(0)
 
-# ==========================================================
-# FIX VALIDATION EPISODES
-# ==========================================================
+short_model = make_trial_model()
 
-val_dataset.set_epoch(
-    0
+short_total_updates = (
+    TRAIN_CONFIG["short"]["epochs"]
+    *
+    TRAIN_CONFIG["short"]["steps_per_epoch"]
 )
-
-
-short_model = (
-    make_trial_model()
-)
-
 
 short_optimizer, short_scheduler = (
     build_optimizer_and_scheduler(
-
         short_model,
-
         stage="stage1",
-
-        use_scheduler=False,
+        use_scheduler=True,
+        total_updates=short_total_updates,
     )
 )
 
@@ -51,17 +41,11 @@ short_optimizer, short_scheduler = (
 # BEFORE TRAINING
 # ==========================================================
 
-short_initial_report = (
-    evaluate_episodic_model(
-
-        short_model,
-
-        val_loader,
-
-        show_progress=True,
-    )
+short_initial_report = evaluate_episodic_model(
+    short_model,
+    val_loader,
+    show_progress=True,
 )
-
 
 if (
     short_initial_report[
@@ -72,55 +56,23 @@ if (
     !=
     80
 ):
-
     raise RuntimeError(
-        "Validation episodes do not "
-        "cover all 80 source classes."
+        "Validation episodes do not cover all 80 source classes."
     )
-
 
 print("=" * 70)
 print("SHORT GENERALIZATION — INITIAL")
 print("=" * 70)
-
-print(
-    "mAP50:",
-    short_initial_report[
-        "metrics"
-    ][
-        "mAP50"
-    ]
-)
-
-print(
-    "mAP50:95:",
-    short_initial_report[
-        "metrics"
-    ][
-        "mAP50_95"
-    ]
-)
-
-print(
-    "Geometry50:",
-    short_initial_report[
-        "metrics"
-    ][
-        "geometry_recall50"
-    ]
-)
-
+print("AP50      :", short_initial_report["metrics"]["mAP50"])
+print("Precision :", short_initial_report["metrics"]["precision50"])
+print("Recall    :", short_initial_report["metrics"]["recall50"])
+print("Geometry50:", short_initial_report["metrics"]["geometry_recall50"])
+print("=" * 70)
 
 short_history = []
-
-
-short_best_report = (
-    copy.deepcopy(
-        short_initial_report
-    )
+short_best_report = copy.deepcopy(
+    short_initial_report
 )
-
-
 short_best_epoch = 0
 
 
@@ -130,65 +82,37 @@ short_best_epoch = 0
 
 for epoch in range(
     1,
-    TRAIN_CONFIG[
-        "short"
-    ][
-        "epochs"
-    ]
-    +
-    1
+    TRAIN_CONFIG["short"]["epochs"] + 1
 ):
 
-    # New balanced training episodes each epoch.
-    train_dataset.set_epoch(
-        epoch
+    train_dataset.set_epoch(epoch)
+
+    train_stats = train_detection_epoch(
+        target_model=short_model,
+        loader=train_loader,
+        optimizer=short_optimizer,
+        max_steps=(
+            TRAIN_CONFIG[
+                "short"
+            ][
+                "steps_per_epoch"
+            ]
+        ),
+        stage="stage1",
+        description=(
+            f"Short COCO80 {epoch}/"
+            f"{TRAIN_CONFIG['short']['epochs']}"
+        ),
+        show_progress=True,
+        scheduler=short_scheduler,
     )
 
-    train_stats = (
-        train_detection_epoch(
+    val_dataset.set_epoch(0)
 
-            target_model=
-                short_model,
-
-            loader=
-                train_loader,
-
-            optimizer=
-                short_optimizer,
-
-            max_steps=
-                TRAIN_CONFIG[
-                    "short"
-                ][
-                    "steps_per_epoch"
-                ],
-
-            stage=
-                "stage1",
-
-            description=
-                (
-                    f"Short COCO80 "
-                    f"{epoch}/"
-                    f"{TRAIN_CONFIG['short']['epochs']}"
-                ),
-        )
-    )
-
-    # Validation stays FIXED.
-    val_dataset.set_epoch(
-        0
-    )
-
-    val_report = (
-        evaluate_episodic_model(
-
-            short_model,
-
-            val_loader,
-
-            show_progress=True,
-        )
+    val_report = evaluate_episodic_model(
+        short_model,
+        val_loader,
+        show_progress=True,
     )
 
     if (
@@ -200,35 +124,71 @@ for epoch in range(
         !=
         80
     ):
-
         raise RuntimeError(
-            "Validation coverage "
-            "changed unexpectedly."
+            "Validation coverage changed unexpectedly."
         )
+
+    current_lrs = {
+        group.get(
+            "name",
+            str(index)
+        ):
+            group[
+                "lr"
+            ]
+        for index, group
+        in enumerate(
+            short_optimizer.param_groups
+        )
+    }
 
     short_history.append(
         {
-            "epoch":
-                epoch,
-
-            "train":
-                train_stats,
-
-            "val":
-                val_report,
+            "epoch": epoch,
+            "train": copy.deepcopy(
+                train_stats
+            ),
+            "val": copy.deepcopy(
+                val_report
+            ),
+            "learning_rates": current_lrs,
         }
     )
 
+    # Final thesis accuracy priority:
+    # AP50 first, then P/R, then geometry/loss diagnostics.
+    current_rank = (
+        val_report["metrics"]["mAP50"],
+        val_report["metrics"]["precision50"],
+        val_report["metrics"]["recall50"],
+        val_report["metrics"]["geometry_recall50"],
+        -val_report["mean_loss"]["loss_total"],
+    )
+
+    best_rank = (
+        short_best_report["metrics"]["mAP50"],
+        short_best_report["metrics"]["precision50"],
+        short_best_report["metrics"]["recall50"],
+        short_best_report["metrics"]["geometry_recall50"],
+        -short_best_report["mean_loss"]["loss_total"],
+    )
+
+    if current_rank > best_rank:
+        short_best_report = copy.deepcopy(
+            val_report
+        )
+        short_best_epoch = epoch
+
     print(
-        f"Epoch {epoch}",
-        "| train loss",
+        f"Epoch {epoch:02d}",
+        "| train",
         round(
             train_stats[
                 "loss_total"
             ],
             4
         ),
-        "| val mAP50",
+        "| AP50",
         round(
             val_report[
                 "metrics"
@@ -237,16 +197,25 @@ for epoch in range(
             ],
             4
         ),
-        "| val mAP50:95",
+        "| P",
         round(
             val_report[
                 "metrics"
             ][
-                "mAP50_95"
+                "precision50"
             ],
             4
         ),
-        "| geometry",
+        "| R",
+        round(
+            val_report[
+                "metrics"
+            ][
+                "recall50"
+            ],
+            4
+        ),
+        "| geo",
         round(
             val_report[
                 "metrics"
@@ -255,69 +224,13 @@ for epoch in range(
             ],
             4
         ),
+        "| lr(main)",
+        f"{current_lrs.get('main', float('nan')):.2e}",
     )
-
-    current_rank = (
-
-        val_report[
-            "metrics"
-        ][
-            "mAP50_95"
-        ],
-
-        val_report[
-            "metrics"
-        ][
-            "mAP50"
-        ],
-
-        val_report[
-            "metrics"
-        ][
-            "geometry_recall50"
-        ],
-    )
-
-    best_rank = (
-
-        short_best_report[
-            "metrics"
-        ][
-            "mAP50_95"
-        ],
-
-        short_best_report[
-            "metrics"
-        ][
-            "mAP50"
-        ],
-
-        short_best_report[
-            "metrics"
-        ][
-            "geometry_recall50"
-        ],
-    )
-
-    if (
-        current_rank
-        >
-        best_rank
-    ):
-
-        short_best_report = (
-            copy.deepcopy(
-                val_report
-            )
-        )
-
-        short_best_epoch = (
-            epoch
-        )
 
 
 # ==========================================================
-# GENERALIZATION GATE
+# STABILITY-AWARE GATE
 # ==========================================================
 
 initial_map50 = (
@@ -328,15 +241,12 @@ initial_map50 = (
     ]
 )
 
-
 required_map50 = max(
-
     TRAIN_CONFIG[
         "short"
     ][
         "absolute_map50_floor"
     ],
-
     initial_map50
     *
     TRAIN_CONFIG[
@@ -346,141 +256,155 @@ required_map50 = max(
     ],
 )
 
-
-map5095_improvement = (
-
-    short_best_report[
-        "metrics"
+window = min(
+    TRAIN_CONFIG[
+        "short"
     ][
-        "mAP50_95"
-    ]
-
-    -
-
-    short_initial_report[
-        "metrics"
-    ][
-        "mAP50_95"
-    ]
+        "stability_window"
+    ],
+    len(
+        short_history
+    )
 )
 
+if window < 1:
+    raise RuntimeError(
+        "No short-training history was created."
+    )
 
-geometry_improved = (
+last_window = short_history[
+    -window:
+]
 
-    short_best_report[
-        "metrics"
-    ][
-        "geometry_recall50"
-    ]
-
-    >
-
-    short_initial_report[
-        "metrics"
-    ][
-        "geometry_recall50"
-    ]
+last_map50 = np.asarray(
+    [
+        item[
+            "val"
+        ][
+            "metrics"
+        ][
+            "mAP50"
+        ]
+        for item
+        in last_window
+    ],
+    dtype=np.float64,
 )
 
+last_precision = np.asarray(
+    [
+        item[
+            "val"
+        ][
+            "metrics"
+        ][
+            "precision50"
+        ]
+        for item
+        in last_window
+    ],
+    dtype=np.float64,
+)
 
-COCO80_GENERALIZATION_GATE_PASSED = bool(
+last_recall = np.asarray(
+    [
+        item[
+            "val"
+        ][
+            "metrics"
+        ][
+            "recall50"
+        ]
+        for item
+        in last_window
+    ],
+    dtype=np.float64,
+)
 
-    short_best_epoch
-    >
-    0
-
-    and
-
+best_map50 = (
     short_best_report[
         "metrics"
     ][
         "mAP50"
     ]
-    >=
-    required_map50
+)
 
-    and
-
-    map5095_improvement
+stable_tail = bool(
+    float(
+        last_map50.mean()
+    )
     >=
     TRAIN_CONFIG[
         "short"
     ][
-        "minimum_map5095_improvement"
+        "stability_fraction"
     ]
+    *
+    max(
+        best_map50,
+        1e-12
+    )
+)
 
+precision_recall_alive = bool(
+    float(
+        last_precision.mean()
+    )
+    >
+    0.0
     and
+    float(
+        last_recall.mean()
+    )
+    >
+    0.0
+)
 
-    geometry_improved
-
-    and
-
+geometry_improved = bool(
     short_best_report[
         "metrics"
     ][
-        "classes_evaluated"
+        "geometry_recall50"
     ]
-    ==
-    80
-)
-
-
-print("=" * 70)
-print("STEP 29 : COCO-80 GENERALIZATION RESULT")
-print("=" * 70)
-
-print(
-    "Initial mAP50  :",
-    initial_map50
-)
-
-print(
-    "Required mAP50 :",
-    required_map50
-)
-
-print(
-    "Best mAP50     :",
-    short_best_report[
-        "metrics"
-    ][
-        "mAP50"
-    ]
-)
-
-print(
-    "Initial 50:95  :",
+    >
     short_initial_report[
         "metrics"
     ][
-        "mAP50_95"
+        "geometry_recall50"
     ]
 )
 
-print(
-    "Best 50:95     :",
-    short_best_report[
-        "metrics"
-    ][
-        "mAP50_95"
-    ]
-)
-
-print(
-    "Best epoch     :",
-    short_best_epoch
-)
-
-print(
-    "GENERALIZATION:",
-    COCO80_GENERALIZATION_GATE_PASSED
+COCO80_GENERALIZATION_GATE_PASSED = bool(
+    short_best_epoch > 0
+    and
+    best_map50 >= required_map50
+    and
+    geometry_improved
+    and
+    precision_recall_alive
+    and
+    stable_tail
 )
 
 print("=" * 70)
-
+print("STEP 29 : SHORT COCO-80 STABILITY GATE")
+print("=" * 70)
+print("Initial AP50       :", initial_map50)
+print("Required AP50      :", required_map50)
+print("Best epoch         :", short_best_epoch)
+print("Best AP50          :", best_map50)
+print("Best Precision     :", short_best_report["metrics"]["precision50"])
+print("Best Recall        :", short_best_report["metrics"]["recall50"])
+print("Best Geometry50    :", short_best_report["metrics"]["geometry_recall50"])
+print("Last-window AP50   :", last_map50.tolist())
+print("Last-window mean   :", float(last_map50.mean()))
+print("Stable >=80% best  :", stable_tail)
+print("P/R alive          :", precision_recall_alive)
+print("Geometry improved  :", geometry_improved)
+print("GATE PASSED        :", COCO80_GENERALIZATION_GATE_PASSED)
+print("=" * 70)
 
 short_model.cpu()
-
 del short_model
 del short_optimizer
 del short_scheduler
