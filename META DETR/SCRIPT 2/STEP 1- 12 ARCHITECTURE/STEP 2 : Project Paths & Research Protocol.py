@@ -1,16 +1,20 @@
 # ==========================================================
-# STEP 2 : Paths & Final Research Protocol
+# STEP 2 : Paths & Locked Research Protocol
 #
 # LOCKED PIPELINE:
 #
 # Stage 1:
-#   COCO 80-class episodic meta-training
+#   COCO-80 episodic support-conditioned meta-training
 #
-# Stage 2:
-#   COCO-person specialization
+# Source readiness gates:
+#   COCO-Val 80-class stability/generalization
+#   COCO-Val person-only gate
+#
+# Stage 2 (FALLBACK ONLY):
+#   COCO-person specialization IF the person gate fails
 #
 # Stage 3:
-#   CCTV person 1/3/5-shot adaptation
+#   CCTV person 1/3/5-shot cross-domain adaptation
 # ==========================================================
 
 PROJECT_ROOT = (
@@ -42,6 +46,7 @@ COCO80_CHECKPOINT_DIR = os.path.join(
     "coco80_meta"
 )
 
+# Kept because COCO-person specialization remains a fallback.
 PERSON_CHECKPOINT_DIR = os.path.join(
     CHECKPOINT_DIR,
     "coco_person"
@@ -61,7 +66,6 @@ LOG_DIR = os.path.join(
     PROJECT_ROOT,
     "logs"
 )
-
 
 for path in (
     PROJECT_ROOT,
@@ -124,18 +128,31 @@ RESEARCH_PROTOCOL = {
     ),
 
     # ------------------------------------------------------
-    # STAGE 2
+    # SOURCE READINESS
+    # ------------------------------------------------------
+
+    "source_gate_1": (
+        "stable unseen COCO-Val 80-class episodic generalization"
+    ),
+
+    "source_gate_2": (
+        "COCO-Val person-only AP50/Precision/Recall gate"
+    ),
+
+    # ------------------------------------------------------
+    # STAGE 2 — FALLBACK ONLY
     # ------------------------------------------------------
 
     "stage_2": (
-        "COCO-person specialization"
+        "COCO-person specialization — FALLBACK ONLY"
+    ),
+
+    "stage_2_trigger": (
+        "run only if generic COCO-80 checkpoint passes the "
+        "generic gate but person-specific validation is weak"
     ),
 
     "stage_2_semantic_class": "person",
-
-    "stage_2_validation": (
-        "COCO-Val person generalization gate"
-    ),
 
     # ------------------------------------------------------
     # STAGE 3
@@ -165,69 +182,54 @@ RESEARCH_PROTOCOL = {
     },
 
     "target_initialization": (
-        "each 1/3/5-shot experiment starts "
-        "independently from the same final "
-        "COCO-person source checkpoint"
+        "each 1/3/5-shot experiment starts independently "
+        "from the same final source checkpoint; normally the "
+        "stable COCO-80 checkpoint, or the COCO-person fallback "
+        "checkpoint only when the person gate requires it"
     ),
 
     "target_split_policy": (
-        "support/train, validation, and test "
-        "must be separated by sequence/session/"
-        "camera/time block where possible"
+        "support/train, validation, and test must be separated "
+        "by sequence/session/camera/time block where possible; "
+        "do not randomly split adjacent CCTV frames"
     ),
 
     "target_val": (
-        "no gradient; model selection only"
+        "no final reporting; hyperparameter/model selection only"
     ),
 
     "target_test": (
         "final evaluation only"
     ),
+
+    # ------------------------------------------------------
+    # LOCKED FINAL THESIS METRICS
+    # ------------------------------------------------------
+
+    "final_metrics": {
+        "AP50": "IoU >= 0.50; primary accuracy metric",
+        "Precision": "score >= 0.50 and IoU >= 0.50",
+        "Recall": "score >= 0.50 and IoU >= 0.50",
+        "Inference_Time": (
+            "mean ms/image; batch size 1; 640x640; same GPU; "
+            "support prototype cached"
+        ),
+    },
+
+    "removed_metric": "NCAcc",
 }
 
 
 print("=" * 70)
-print("STEP 2 : FINAL RESEARCH PROTOCOL READY")
+print("STEP 2 : LOCKED RESEARCH PROTOCOL READY")
 print("=" * 70)
-
-print(
-    "Model        :",
-    RESEARCH_PROTOCOL["model"]
-)
-
-print(
-    "Stage 1      :",
-    RESEARCH_PROTOCOL["stage_1"]
-)
-
-print(
-    "Source cats  :",
-    RESEARCH_PROTOCOL["stage_1_categories"]
-)
-
-print(
-    "Stage 2      :",
-    RESEARCH_PROTOCOL["stage_2"]
-)
-
-print(
-    "Stage 3      :",
-    RESEARCH_PROTOCOL["stage_3"]
-)
-
-print(
-    "Target shots :",
-    RESEARCH_PROTOCOL["target_shots"]
-)
-
-print(
-    "Shot unit    :",
-    RESEARCH_PROTOCOL["shot_definition"]
-)
-
-print(
-    "Project root :",
-    PROJECT_ROOT
-)
-
+print("Model        :", RESEARCH_PROTOCOL["model"])
+print("Stage 1      :", RESEARCH_PROTOCOL["stage_1"])
+print("Source gate  :", RESEARCH_PROTOCOL["source_gate_2"])
+print("Stage 2      :", RESEARCH_PROTOCOL["stage_2"])
+print("Stage 3      :", RESEARCH_PROTOCOL["stage_3"])
+print("Target shots :", RESEARCH_PROTOCOL["target_shots"])
+print("Shot unit    :", RESEARCH_PROTOCOL["shot_definition"])
+print("Final metrics:", list(RESEARCH_PROTOCOL["final_metrics"].keys()))
+print("Project root :", PROJECT_ROOT)
 print("=" * 70)
