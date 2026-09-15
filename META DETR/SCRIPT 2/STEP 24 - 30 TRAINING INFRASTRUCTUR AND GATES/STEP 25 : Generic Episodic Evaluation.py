@@ -414,6 +414,7 @@ def average_precision_from_ranked(
 def compute_episodic_metrics(
     records,
     score_threshold=0.50,
+    primary_iou_threshold=0.50,
 ):
 
     if not records:
@@ -658,7 +659,7 @@ def compute_episodic_metrics(
 
                 gt_boxes,
 
-                0.50,
+                primary_iou_threshold,
             )
         )
 
@@ -730,7 +731,7 @@ def compute_episodic_metrics(
                         cols
                     ]
                     >=
-                    0.50
+                    primary_iou_threshold
                 ).sum()
             )
 
@@ -1002,9 +1003,31 @@ def evaluate_episodic_model(
             )
         )
 
+        support_padding_masks = (
+            batch[
+                "support_padding_masks"
+            ].to(
+                CONFIG[
+                    "device"
+                ],
+                non_blocking=True,
+            )
+        )
+
         query_images = (
             batch[
                 "query_images"
+            ].to(
+                CONFIG[
+                    "device"
+                ],
+                non_blocking=True,
+            )
+        )
+
+        query_padding_masks = (
+            batch[
+                "query_padding_masks"
             ].to(
                 CONFIG[
                     "device"
@@ -1027,6 +1050,10 @@ def evaluate_episodic_model(
         outputs = target_model(
             support_images,
             query_images,
+            support_padding_mask=
+                support_padding_masks,
+            query_padding_mask=
+                query_padding_masks,
         )
 
         losses = criterion(
@@ -1123,6 +1150,11 @@ def evaluate_episodic_model(
                 TRAIN_CONFIG[
                     "score_threshold"
                 ],
+
+            primary_iou_threshold=
+                TRAIN_CONFIG[
+                    "primary_iou_threshold"
+                ],
         )
     )
 
@@ -1154,8 +1186,10 @@ print("STEP 25 : GENERIC EPISODIC EVALUATOR READY")
 print("=" * 70)
 
 print(
-    "Metrics: mAP50 / mAP75 / "
-    "mAP95 / mAP50:95"
+    "Primary: AP50 + Precision@0.50 + Recall@0.50"
+)
+print(
+    "Diagnostics: mAP75 / mAP95 / mAP50:95 / Geometry50"
 )
 
 print("=" * 70)
