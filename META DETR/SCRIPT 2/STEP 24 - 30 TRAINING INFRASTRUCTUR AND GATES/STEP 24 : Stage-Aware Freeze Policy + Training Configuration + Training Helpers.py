@@ -1,25 +1,20 @@
 # ==========================================================
 # STEP 24 : Stage-Aware Freeze Policy
-#           + Training Configuration
-#           + Training Helpers
+#           + Stabilized Training Configuration
+#           + Warmup-Cosine Scheduler
+#           + Effective Episodic Batch = 4
 # ==========================================================
 
 import gc
 import copy
 
-from itertools import (
-    islice
-)
-
-from torch.optim.lr_scheduler import (
-    MultiStepLR
-)
+from itertools import islice
 
 from tqdm.auto import tqdm
 
 
 # ==========================================================
-# TRAINING CONFIGURATION
+# TRAINING CONFIGURATION — LOCKED STABILITY REVISION
 # ==========================================================
 
 TRAIN_CONFIG = {
@@ -32,59 +27,55 @@ TRAIN_CONFIG = {
 
         "epochs": 25,
 
+        # IMPORTANT:
+        # This is the number of OPTIMIZER updates per epoch.
         "steps_per_epoch": 800,
 
-        "main_lr": 1e-4,
-
-        "backbone_lr": 1e-5,
-
-        "weight_decay": 1e-4,
-
-        "gradient_clip": 0.1,
-
-        "milestones": [
-            15,
-            20,
-        ],
-
-        "gamma": 0.1,
-    },
-
-    # ------------------------------------------------------
-    # STAGE 2 defaults
-    # Actual Stage-2 training appears after STEP 30.
-    # ------------------------------------------------------
-
-    "stage2": {
-
+        # Lower LR than previous unstable run.
         "main_lr": 5e-5,
-
         "backbone_lr": 5e-6,
 
         "weight_decay": 1e-4,
-
         "gradient_clip": 0.1,
+
+        # Physical loader batch = 1.
+        # 4 episodic micro-batches are averaged per update.
+        "accumulation_steps": 4,
+
+        # Warmup + smooth cosine decay.
+        "warmup_updates": 500,
+        "warmup_start_factor": 0.10,
+        "min_lr_factor": 0.10,
     },
 
     # ------------------------------------------------------
-    # STAGE 3 defaults
+    # STAGE 2 — fallback only
+    # ------------------------------------------------------
+
+    "stage2": {
+        "main_lr": 5e-5,
+        "backbone_lr": 5e-6,
+        "weight_decay": 1e-4,
+        "gradient_clip": 0.1,
+        "accumulation_steps": 1,
+    },
+
+    # ------------------------------------------------------
+    # STAGE 3 — CCTV defaults
     # ------------------------------------------------------
 
     "stage3": {
-
         "main_lr": 1e-4,
-
         "weight_decay": 1e-4,
-
         "gradient_clip": 0.1,
+        "accumulation_steps": 1,
     },
 
     # ------------------------------------------------------
-    # Evaluation
+    # LOCKED FINAL EVALUATION PARAMETERS
     # ------------------------------------------------------
 
     "score_threshold": 0.50,
-
     "primary_iou_threshold": 0.50,
 
     # ------------------------------------------------------
@@ -92,43 +83,34 @@ TRAIN_CONFIG = {
     # ------------------------------------------------------
 
     "tiny": {
-
         "num_classes": 8,
-
         "episodes_per_class": 2,
-
         "epochs": 50,
-
         "min_map50_improvement": 0.05,
-
         "min_geometry_improvement": 0.10,
     },
 
     # ------------------------------------------------------
-    # Short unseen COCO-Val generalization test
+    # Short unseen COCO-Val stability/generalization gate
     # ------------------------------------------------------
 
     "short": {
-
         "epochs": 5,
-
         "steps_per_epoch": 800,
 
         # mAP values are [0,1].
         "absolute_map50_floor": 0.01,
-
         "relative_factor": 1.25,
 
-        "minimum_map5095_improvement": 1e-4,
+        # Stable tail must retain at least 80% of best AP50.
+        "stability_fraction": 0.80,
+        "stability_window": 3,
     },
 }
 
 
 # ==========================================================
 # INITIAL MODEL SNAPSHOT
-#
-# Every diagnostic experiment starts from EXACT SAME
-# initial model weights.
 # ==========================================================
 
 model.cpu()
@@ -138,7 +120,6 @@ gc.collect()
 if torch.cuda.is_available():
     torch.cuda.empty_cache()
 
-
 MODEL_TEMPLATE = (
     copy.deepcopy(
         model
@@ -146,14 +127,11 @@ MODEL_TEMPLATE = (
     .cpu()
 )
 
-
 INITIAL_MODEL_STATE = {
-
     key:
         value.detach()
         .cpu()
         .clone()
-
     for key, value
     in model.state_dict().items()
 }
@@ -180,18 +158,16 @@ def make_trial_model():
 
 
 # ==========================================================
-# TRAINABLE HELPERS
+# TRAINABLE / FREEZE HELPERS
 # ==========================================================
+
 
 def set_module_trainable(
     module,
     trainable
 ):
 
-    for parameter in (
-        module.parameters()
-    ):
-
+    for parameter in module.parameters():
         parameter.requires_grad = bool(
             trainable
         )
@@ -202,19 +178,14 @@ def freeze_backbone_bn_statistics(
 ):
 
     # Running statistics frozen.
-    #
-    # Affine parameters may remain trainable
-    # depending on freeze policy.
-
-    for module in (
-        backbone.modules()
-    ):
+    # Affine parameters may remain trainable depending
+    # on stage freeze policy.
+    for module in backbone.modules():
 
         if isinstance(
             module,
             nn.BatchNorm2d
         ):
-
             module.eval()
 
 
@@ -223,108 +194,59 @@ def apply_freeze_policy(
     stage
 ):
 
-    stage = str(
-        stage
-    ).lower()
+    stage = str(stage).lower()
 
     # Start from fully trainable.
-    for parameter in (
-        target_model.parameters()
-    ):
-
+    for parameter in target_model.parameters():
         parameter.requires_grad = True
 
-    # ------------------------------------------------------
-    # STAGE 1:
-    # Full model trainable.
-    # Backbone receives smaller LR.
-    # ------------------------------------------------------
-
     if stage == "stage1":
-
+        # Full model trainable; backbone gets lower LR.
         pass
-
-    # ------------------------------------------------------
-    # STAGE 2:
-    #
-    # backbone.body indexes:
-    #
-    # 0 conv1
-    # 1 bn1
-    # 2 relu
-    # 3 maxpool
-    # 4 layer1
-    # 5 layer2
-    # 6 layer3
-    # 7 layer4
-    # ------------------------------------------------------
 
     elif stage == "stage2":
 
+        # Fallback COCO-person specialization.
         set_module_trainable(
             target_model.backbone,
             False
         )
 
+        # ResNet layer3 + layer4 only.
         set_module_trainable(
-            target_model
-            .backbone
-            .body[6],
+            target_model.backbone.body[6],
             True
         )
 
         set_module_trainable(
-            target_model
-            .backbone
-            .body[7],
+            target_model.backbone.body[7],
             True
         )
-
-    # ------------------------------------------------------
-    # STAGE 3:
-    #
-    # CCTV few-shot:
-    #
-    # frozen:
-    # backbone
-    # query encoder
-    # transformer encoder
-    # transformer decoder
-    #
-    # train:
-    # support encoder
-    # relation module
-    # detection head
-    # ------------------------------------------------------
 
     elif stage == "stage3":
 
-        for parameter in (
-            target_model.parameters()
-        ):
-
+        # CCTV few-shot:
+        # frozen = backbone/query encoder/transformer
+        # train  = support encoder/relation/head
+        for parameter in target_model.parameters():
             parameter.requires_grad = False
 
         set_module_trainable(
-            target_model
-            .support_encoder,
+            target_model.support_encoder,
             True
         )
 
         set_module_trainable(
-            target_model
-            .relation_module,
+            target_model.relation_module,
             True
         )
 
         set_module_trainable(
-            target_model
-            .detection_head,
+            target_model.detection_head,
             True
         )
 
     else:
-
         raise ValueError(
             "Unknown stage: "
             f"{stage}"
@@ -342,7 +264,7 @@ def prepare_model_for_training(
     target_model.train()
 
     # model.train() switches BN back to train,
-    # so freeze BN statistics again.
+    # therefore freeze BN statistics again.
     freeze_backbone_bn_statistics(
         target_model.backbone
     )
@@ -361,18 +283,265 @@ def count_trainable_parameters(
 
 
 # ==========================================================
-# OPTIMIZER
+# UPDATE-LEVEL WARMUP + COSINE SCHEDULER
 # ==========================================================
+
+class WarmupCosineScheduler:
+
+    def __init__(
+        self,
+        optimizer,
+        total_updates,
+        warmup_updates,
+        warmup_start_factor=0.10,
+        min_lr_factor=0.10,
+    ):
+
+        self.optimizer = optimizer
+        self.total_updates = int(total_updates)
+        self.warmup_updates = min(
+            int(warmup_updates),
+            self.total_updates
+        )
+
+        self.warmup_start_factor = float(
+            warmup_start_factor
+        )
+
+        self.min_lr_factor = float(
+            min_lr_factor
+        )
+
+        if self.total_updates < 1:
+            raise ValueError(
+                "total_updates must be >= 1."
+            )
+
+        if not (
+            0.0
+            <
+            self.warmup_start_factor
+            <=
+            1.0
+        ):
+            raise ValueError(
+                "warmup_start_factor must be in (0,1]."
+            )
+
+        if not (
+            0.0
+            <=
+            self.min_lr_factor
+            <=
+            1.0
+        ):
+            raise ValueError(
+                "min_lr_factor must be in [0,1]."
+            )
+
+        self.base_lrs = [
+            float(group["lr"])
+            for group
+            in optimizer.param_groups
+        ]
+
+        self.num_updates = 0
+
+        # First optimizer update starts at warmup LR.
+        self._apply_factor(
+            self._factor_for_update(0)
+        )
+
+    def _factor_for_update(
+        self,
+        update_index
+    ):
+
+        update_index = int(update_index)
+
+        if (
+            self.warmup_updates > 0
+            and
+            update_index
+            <
+            self.warmup_updates
+        ):
+
+            progress = (
+                update_index
+                /
+                float(
+                    max(
+                        self.warmup_updates,
+                        1
+                    )
+                )
+            )
+
+            return (
+                self.warmup_start_factor
+                +
+                (
+                    1.0
+                    -
+                    self.warmup_start_factor
+                )
+                *
+                progress
+            )
+
+        decay_updates = max(
+            self.total_updates
+            -
+            self.warmup_updates,
+            1
+        )
+
+        decay_progress = (
+            update_index
+            -
+            self.warmup_updates
+        ) / float(
+            decay_updates
+        )
+
+        decay_progress = min(
+            max(
+                decay_progress,
+                0.0
+            ),
+            1.0
+        )
+
+        cosine = 0.5 * (
+            1.0
+            +
+            math.cos(
+                math.pi
+                *
+                decay_progress
+            )
+        )
+
+        return (
+            self.min_lr_factor
+            +
+            (
+                1.0
+                -
+                self.min_lr_factor
+            )
+            *
+            cosine
+        )
+
+    def _apply_factor(
+        self,
+        factor
+    ):
+
+        for base_lr, group in zip(
+            self.base_lrs,
+            self.optimizer.param_groups,
+        ):
+            group["lr"] = (
+                base_lr
+                *
+                float(factor)
+            )
+
+    def step(self):
+
+        self.num_updates += 1
+
+        next_update = min(
+            self.num_updates,
+            self.total_updates
+        )
+
+        self._apply_factor(
+            self._factor_for_update(
+                next_update
+            )
+        )
+
+    def state_dict(self):
+
+        return {
+            "total_updates": self.total_updates,
+            "warmup_updates": self.warmup_updates,
+            "warmup_start_factor": self.warmup_start_factor,
+            "min_lr_factor": self.min_lr_factor,
+            "base_lrs": copy.deepcopy(
+                self.base_lrs
+            ),
+            "num_updates": self.num_updates,
+        }
+
+    def load_state_dict(
+        self,
+        state_dict
+    ):
+
+        self.total_updates = int(
+            state_dict[
+                "total_updates"
+            ]
+        )
+
+        self.warmup_updates = int(
+            state_dict[
+                "warmup_updates"
+            ]
+        )
+
+        self.warmup_start_factor = float(
+            state_dict[
+                "warmup_start_factor"
+            ]
+        )
+
+        self.min_lr_factor = float(
+            state_dict[
+                "min_lr_factor"
+            ]
+        )
+
+        self.base_lrs = list(
+            state_dict[
+                "base_lrs"
+            ]
+        )
+
+        self.num_updates = int(
+            state_dict[
+                "num_updates"
+            ]
+        )
+
+        self._apply_factor(
+            self._factor_for_update(
+                min(
+                    self.num_updates,
+                    self.total_updates
+                )
+            )
+        )
+
+
+# ==========================================================
+# OPTIMIZER + SCHEDULER
+# ==========================================================
+
 
 def build_optimizer_and_scheduler(
     target_model,
     stage,
-    use_scheduler=True
+    use_scheduler=True,
+    total_updates=None,
 ):
 
-    stage = str(
-        stage
-    ).lower()
+    stage = str(stage).lower()
 
     apply_freeze_policy(
         target_model,
@@ -399,18 +568,6 @@ def build_optimizer_and_scheduler(
             ]
         )
 
-        milestones = (
-            stage_config[
-                "milestones"
-            ]
-        )
-
-        gamma = (
-            stage_config[
-                "gamma"
-            ]
-        )
-
     elif stage == "stage2":
 
         stage_config = (
@@ -431,10 +588,6 @@ def build_optimizer_and_scheduler(
             ]
         )
 
-        milestones = []
-
-        gamma = 1.0
-
     elif stage == "stage3":
 
         stage_config = (
@@ -451,49 +604,30 @@ def build_optimizer_and_scheduler(
 
         backbone_lr = None
 
-        milestones = []
-
-        gamma = 1.0
-
     else:
-
-        raise ValueError(
-            stage
-        )
+        raise ValueError(stage)
 
     backbone_parameters = [
-
         parameter
-
         for parameter
-        in target_model
-        .backbone
-        .parameters()
-
+        in target_model.backbone.parameters()
         if parameter.requires_grad
     ]
 
     backbone_ids = {
-        id(
-            parameter
-        )
+        id(parameter)
         for parameter
         in backbone_parameters
     }
 
     main_parameters = [
-
         parameter
-
         for parameter
         in target_model.parameters()
-
         if (
             parameter.requires_grad
             and
-            id(
-                parameter
-            )
+            id(parameter)
             not in backbone_ids
         )
     ]
@@ -501,51 +635,35 @@ def build_optimizer_and_scheduler(
     parameter_groups = []
 
     if main_parameters:
-
         parameter_groups.append(
             {
-                "params":
-                    main_parameters,
-
-                "lr":
-                    main_lr,
-
-                "name":
-                    "main",
+                "params": main_parameters,
+                "lr": main_lr,
+                "name": "main",
             }
         )
 
     if backbone_parameters:
-
         parameter_groups.append(
             {
-                "params":
-                    backbone_parameters,
-
-                "lr":
-                    backbone_lr,
-
-                "name":
-                    "backbone",
+                "params": backbone_parameters,
+                "lr": backbone_lr,
+                "name": "backbone",
             }
         )
 
     if not parameter_groups:
-
         raise RuntimeError(
             "No trainable parameters."
         )
 
-    optimizer = (
-        torch.optim.AdamW(
-
-            parameter_groups,
-
-            weight_decay=
-                stage_config[
-                    "weight_decay"
-                ],
-        )
+    optimizer = torch.optim.AdamW(
+        parameter_groups,
+        weight_decay=(
+            stage_config[
+                "weight_decay"
+            ]
+        ),
     )
 
     scheduler = None
@@ -553,20 +671,34 @@ def build_optimizer_and_scheduler(
     if (
         use_scheduler
         and
-        milestones
+        stage == "stage1"
     ):
 
-        scheduler = (
-            MultiStepLR(
-
-                optimizer,
-
-                milestones=
-                    milestones,
-
-                gamma=
-                    gamma,
+        if total_updates is None:
+            raise ValueError(
+                "Stage1 scheduler requires total_updates."
             )
+
+        scheduler = WarmupCosineScheduler(
+            optimizer=optimizer,
+            total_updates=int(
+                total_updates
+            ),
+            warmup_updates=(
+                stage_config[
+                    "warmup_updates"
+                ]
+            ),
+            warmup_start_factor=(
+                stage_config[
+                    "warmup_start_factor"
+                ]
+            ),
+            min_lr_factor=(
+                stage_config[
+                    "min_lr_factor"
+                ]
+            ),
         )
 
     return (
@@ -579,6 +711,7 @@ def build_optimizer_and_scheduler(
 # DETECTION TRAINING LOSS
 # ==========================================================
 
+
 def compute_detection_training_loss(
     target_model,
     batch,
@@ -589,18 +722,25 @@ def compute_detection_training_loss(
         batch
     )
 
-    targets = (
-        move_targets_to_device(
-            batch[
-                "query_targets"
-            ],
-            device
-        )
+    targets = move_targets_to_device(
+        batch[
+            "query_targets"
+        ],
+        device
     )
 
     support_images = (
         batch[
             "support_images"
+        ].to(
+            device,
+            non_blocking=True
+        )
+    )
+
+    support_padding_masks = (
+        batch[
+            "support_padding_masks"
         ].to(
             device,
             non_blocking=True
@@ -616,9 +756,22 @@ def compute_detection_training_loss(
         )
     )
 
+    query_padding_masks = (
+        batch[
+            "query_padding_masks"
+        ].to(
+            device,
+            non_blocking=True
+        )
+    )
+
     outputs = target_model(
         support_images,
         query_images,
+        support_padding_mask=
+            support_padding_masks,
+        query_padding_mask=
+            query_padding_masks,
     )
 
     losses = criterion(
@@ -633,10 +786,8 @@ def compute_detection_training_loss(
         for value
         in losses.values()
     ):
-
         raise RuntimeError(
-            "Detection loss contains "
-            "NaN/Inf."
+            "Detection loss contains NaN/Inf."
         )
 
     return losses
@@ -644,7 +795,10 @@ def compute_detection_training_loss(
 
 # ==========================================================
 # TRAIN ONE EPOCH
+#
+# max_steps = OPTIMIZER updates, not micro-batches.
 # ==========================================================
+
 
 def train_detection_epoch(
     target_model,
@@ -654,16 +808,49 @@ def train_detection_epoch(
     stage,
     description,
     show_progress=True,
+    scheduler=None,
+    accumulation_steps=None,
 ):
 
-    max_steps = int(
-        max_steps
-    )
+    max_steps = int(max_steps)
 
     if max_steps < 1:
-
         raise ValueError(
             "max_steps must be >= 1."
+        )
+
+    stage = str(stage).lower()
+
+    if accumulation_steps is None:
+        accumulation_steps = int(
+            TRAIN_CONFIG[
+                stage
+            ].get(
+                "accumulation_steps",
+                1
+            )
+        )
+
+    accumulation_steps = int(
+        accumulation_steps
+    )
+
+    if accumulation_steps < 1:
+        raise ValueError(
+            "accumulation_steps must be >= 1."
+        )
+
+    micro_batches_needed = (
+        max_steps
+        *
+        accumulation_steps
+    )
+
+    if len(loader) < micro_batches_needed:
+        raise RuntimeError(
+            "Loader is too short for requested optimizer "
+            f"updates: need {micro_batches_needed} micro-batches, "
+            f"have {len(loader)}."
         )
 
     prepare_model_for_training(
@@ -671,74 +858,76 @@ def train_detection_epoch(
     )
 
     totals = {
-
         "loss_cls": 0.0,
-
         "loss_bbox": 0.0,
-
         "loss_giou": 0.0,
-
         "loss_total": 0.0,
     }
 
-    count = 0
+    micro_count = 0
+    update_count = 0
 
     iterator = islice(
         loader,
-        max_steps
+        micro_batches_needed
     )
 
     if show_progress:
-
         iterator = tqdm(
-
             iterator,
-
-            total=min(
-                max_steps,
-                len(
-                    loader
-                )
-            ),
-
+            total=micro_batches_needed,
             desc=description,
         )
 
     trainable_parameters = [
-
         parameter
-
         for parameter
         in target_model.parameters()
-
         if parameter.requires_grad
     ]
 
+    optimizer.zero_grad(
+        set_to_none=True
+    )
+
     for batch in iterator:
 
-        optimizer.zero_grad(
-            set_to_none=True
+        losses = compute_detection_training_loss(
+            target_model=target_model,
+            batch=batch,
+            device=CONFIG[
+                "device"
+            ],
         )
 
-        losses = (
-            compute_detection_training_loss(
-
-                target_model=
-                    target_model,
-
-                batch=
-                    batch,
-
-                device=
-                    CONFIG[
-                        "device"
-                    ],
+        # Mean gradient across the effective episodic batch.
+        (
+            losses[
+                "loss_total"
+            ]
+            /
+            float(
+                accumulation_steps
             )
-        )
+        ).backward()
 
-        losses[
-            "loss_total"
-        ].backward()
+        for key in totals:
+            totals[key] += (
+                losses[key]
+                .detach()
+                .item()
+            )
+
+        micro_count += 1
+
+        if (
+            micro_count
+            %
+            accumulation_steps
+            !=
+            0
+        ):
+            continue
 
         stage_gradient_clip = (
             TRAIN_CONFIG[
@@ -749,52 +938,57 @@ def train_detection_epoch(
         )
 
         torch.nn.utils.clip_grad_norm_(
-
             trainable_parameters,
-
-            max_norm=
-                stage_gradient_clip,
-
+            max_norm=stage_gradient_clip,
             error_if_nonfinite=True,
         )
 
         optimizer.step()
 
-        for key in totals:
+        if scheduler is not None:
+            scheduler.step()
 
-            totals[
-                key
-            ] += (
-                losses[
-                    key
-                ]
-                .detach()
-                .item()
-            )
-
-        count += 1
-
-    if count == 0:
-
-        raise RuntimeError(
-            "No training batches "
-            "were processed."
+        optimizer.zero_grad(
+            set_to_none=True
         )
 
-    return {
+        update_count += 1
 
+    if micro_count == 0:
+        raise RuntimeError(
+            "No training micro-batches were processed."
+        )
+
+    if update_count != max_steps:
+        raise RuntimeError(
+            "Unexpected optimizer update count: "
+            f"{update_count} != {max_steps}"
+        )
+
+    physical_batch_size = int(
+        loader.batch_size
+        if loader.batch_size
+        is not None
+        else 1
+    )
+
+    return {
         **{
             key:
                 value
                 /
-                count
-
+                micro_count
             for key, value
             in totals.items()
         },
-
-        "updates":
-            count,
+        "updates": update_count,
+        "micro_batches": micro_count,
+        "accumulation_steps": accumulation_steps,
+        "effective_batch_size": (
+            physical_batch_size
+            *
+            accumulation_steps
+        ),
     }
 
 
@@ -802,44 +996,26 @@ def train_detection_epoch(
 # CHECKPOINT PATHS
 # ==========================================================
 
-COCO80_BEST_CHECKPOINT_PATH = (
-    os.path.join(
-        COCO80_CHECKPOINT_DIR,
-        "coco80_meta_best.pth"
-    )
+COCO80_BEST_CHECKPOINT_PATH = os.path.join(
+    COCO80_CHECKPOINT_DIR,
+    "coco80_meta_best.pth"
 )
 
-
-COCO80_LATEST_CHECKPOINT_PATH = (
-    os.path.join(
-        COCO80_CHECKPOINT_DIR,
-        "coco80_meta_latest.pth"
-    )
+COCO80_LATEST_CHECKPOINT_PATH = os.path.join(
+    COCO80_CHECKPOINT_DIR,
+    "coco80_meta_latest.pth"
 )
 
 
 print("=" * 70)
-print("STEP 24 : STAGE-AWARE TRAINING HELPERS READY")
+print("STEP 24 : STABILIZED TRAINING HELPERS READY")
 print("=" * 70)
-
-print(
-    "Stage 1 backbone : trainable, LR=1e-5"
-)
-
-print(
-    "Stage 1 main     : trainable, LR=1e-4"
-)
-
-print(
-    "Stage 2 backbone : layer3+layer4 only"
-)
-
-print(
-    "Stage 3 backbone : frozen"
-)
-
-print(
-    "Stage 3 train    : support/relation/head"
-)
-
+print("Stage1 main LR      :", TRAIN_CONFIG["stage1"]["main_lr"])
+print("Stage1 backbone LR  :", TRAIN_CONFIG["stage1"]["backbone_lr"])
+print("Accumulation steps  :", TRAIN_CONFIG["stage1"]["accumulation_steps"])
+print("Effective batch     :", TRAIN_CONFIG["stage1"]["accumulation_steps"])
+print("Warmup updates      :", TRAIN_CONFIG["stage1"]["warmup_updates"])
+print("Scheduler            : warmup + cosine")
+print("Stage3 backbone      : frozen")
+print("Stage3 train         : support/relation/head")
 print("=" * 70)
