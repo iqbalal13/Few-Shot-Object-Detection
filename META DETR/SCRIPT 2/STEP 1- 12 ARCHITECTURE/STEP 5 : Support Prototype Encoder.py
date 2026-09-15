@@ -1,13 +1,19 @@
 # ==========================================================
 # STEP 5 : Support Prototype Encoder
+#          + Padding-Mask-Aware Global Average Pooling
 #
 # support feature map
 #       ↓
-# Global Average Pool
+# masked global average pool
 #       ↓
 # 2048 -> 512 -> 256
 #       ↓
 # L2-normalized support prototype
+#
+# IMPORTANT:
+# Letterbox padding must NOT contribute to the support
+# prototype. If no mask is supplied, behavior falls back to
+# ordinary global average pooling.
 # ==========================================================
 
 class SupportPrototypeEncoder(
@@ -60,7 +66,8 @@ class SupportPrototypeEncoder(
 
     def forward(
         self,
-        support_feature_map
+        support_feature_map,
+        padding_mask=None,
     ):
 
         if (
@@ -72,12 +79,76 @@ class SupportPrototypeEncoder(
                 "[B,C,H,W]."
             )
 
-        pooled = (
-            self.pool(
-                support_feature_map
+        if padding_mask is None:
+
+            pooled = (
+                self.pool(
+                    support_feature_map
+                )
+                .flatten(1)
             )
-            .flatten(1)
-        )
+
+        else:
+
+            if padding_mask.dim() != 3:
+                raise ValueError(
+                    "support padding_mask must be [B,H,W]."
+                )
+
+            mask = (
+                padding_mask
+                .to(
+                    support_feature_map.device
+                )
+                .bool()
+            )
+
+            if (
+                mask.shape[-2:]
+                !=
+                support_feature_map.shape[-2:]
+            ):
+
+                mask = (
+                    F.interpolate(
+                        mask[:, None].float(),
+                        size=(
+                            support_feature_map.shape[-2],
+                            support_feature_map.shape[-1],
+                        ),
+                        mode="nearest",
+                    )
+                    [:, 0]
+                    .bool()
+                )
+
+            valid = (
+                (~mask)
+                .to(
+                    support_feature_map.dtype
+                )
+                [:, None]
+            )
+
+            valid_count = (
+                valid.sum(
+                    dim=(2, 3)
+                )
+                .clamp_min(1.0)
+            )
+
+            pooled = (
+                (
+                    support_feature_map
+                    *
+                    valid
+                )
+                .sum(
+                    dim=(2, 3)
+                )
+                /
+                valid_count
+            )
 
         prototype = (
             self.projector(
@@ -95,5 +166,5 @@ class SupportPrototypeEncoder(
 
 
 print("=" * 70)
-print("STEP 5 : SUPPORT PROTOTYPE ENCODER DEFINED")
+print("STEP 5 : MASK-AWARE SUPPORT PROTOTYPE ENCODER DEFINED")
 print("=" * 70)
