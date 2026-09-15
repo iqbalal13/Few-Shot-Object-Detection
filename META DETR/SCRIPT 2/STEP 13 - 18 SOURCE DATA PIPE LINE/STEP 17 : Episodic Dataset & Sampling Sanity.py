@@ -1,5 +1,5 @@
 # ==========================================================
-# STEP 17 : COCO-80 Episodic Dataset Sanity
+# STEP 17 : COCO-80 Episodic Dataset + Letterbox Sanity
 # ==========================================================
 
 import matplotlib.pyplot as plt
@@ -48,7 +48,7 @@ train_dataset.set_epoch(
 
 
 # ==========================================================
-# STRUCTURAL CHECK
+# STRUCTURAL + GEOMETRY CHECK
 # ==========================================================
 
 seen_classes = set()
@@ -115,6 +115,47 @@ for index in range(
             "image_id"
         ].item()
     )
+
+    assert tuple(
+        episode[
+            "support_image"
+        ].shape[-2:]
+    ) == (
+        CONFIG["image_size"],
+        CONFIG["image_size"],
+    )
+
+    assert tuple(
+        episode[
+            "query_image"
+        ].shape[-2:]
+    ) == (
+        CONFIG["image_size"],
+        CONFIG["image_size"],
+    )
+
+    for mask_key in (
+        "support_padding_mask",
+        "query_padding_mask",
+    ):
+
+        mask = episode[
+            mask_key
+        ]
+
+        assert mask.dtype == torch.bool
+
+        assert tuple(
+            mask.shape
+        ) == (
+            CONFIG["image_size"],
+            CONFIG["image_size"],
+        )
+
+        # Every sample must contain valid image area.
+        assert bool(
+            (~mask).any()
+        )
 
     assert (
         len(
@@ -208,37 +249,23 @@ print(
 # ==========================================================
 
 visual_indices = []
-
 used_labels = set()
 
 for index, label in enumerate(
-    train_dataset
-    .episode_labels
+    train_dataset.episode_labels
 ):
 
     if label not in used_labels:
+        visual_indices.append(index)
+        used_labels.add(label)
 
-        visual_indices.append(
-            index
-        )
-
-        used_labels.add(
-            label
-        )
-
-    if len(
-        visual_indices
-    ) >= 4:
+    if len(visual_indices) >= 4:
         break
 
 
 for index in visual_indices:
 
-    episode = (
-        train_dataset[
-            index
-        ]
-    )
+    episode = train_dataset[index]
 
     semantic_label = int(
         episode[
@@ -255,10 +282,7 @@ for index in visual_indices:
     fig, axes = plt.subplots(
         1,
         2,
-        figsize=(
-            12,
-            6
-        )
+        figsize=(12, 6)
     )
 
     axes[0].imshow(
@@ -270,8 +294,7 @@ for index in visual_indices:
     )
 
     axes[0].set_title(
-        f"Support crop: "
-        f"{category_name}"
+        f"Support letterbox: {category_name}"
     )
 
     axes[1].imshow(
@@ -293,7 +316,6 @@ for index in visual_indices:
         cy,
         w,
         h
-
     ) in episode[
         "query_target"
     ][
@@ -319,38 +341,26 @@ for index in visual_indices:
                     *
                     height,
                 ),
-
-                w
-                *
-                width,
-
-                h
-                *
-                height,
-
+                w * width,
+                h * height,
                 fill=False,
-
                 linewidth=2,
             )
         )
 
     axes[1].set_title(
-        "Query: all "
+        "Query letterbox: all "
         f"{category_name} GT"
     )
 
     for axis in axes:
-        axis.axis(
-            "off"
-        )
+        axis.axis("off")
 
     plt.tight_layout()
     plt.show()
-    plt.close(
-        fig
-    )
+    plt.close(fig)
 
 
 print("=" * 70)
-print("STEP 17 PASS : COCO-80 EPISODIC DATA SANITY VALID")
+print("STEP 17 PASS : LETTERBOX + BBOX + MASK SANITY VALID")
 print("=" * 70)
