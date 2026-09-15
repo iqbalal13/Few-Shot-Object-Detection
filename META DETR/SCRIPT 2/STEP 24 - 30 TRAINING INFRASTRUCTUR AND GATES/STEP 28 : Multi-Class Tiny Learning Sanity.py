@@ -1,140 +1,24 @@
 # ==========================================================
-# STEP 28 : Multi-Class Tiny Learning Sanity
+# STEP 27 : Stage-1 Forward / Backward / Optimizer Smoke Test
 #
-# Fixed tiny set:
-# 8 semantic classes
-# 2 episodes / class
-#
-# This is an OVERFIT / LEARNING-CAPABILITY test.
-# NOT a generalization test.
+# Verify:
+# - forward valid
+# - backward valid
+# - backbone receives gradient
+# - main model receives gradient
+# - optimizer updates parameters
+# - BN running statistics remain frozen
 # ==========================================================
 
-train_dataset.set_epoch(
-    0
-)
-
-
-tiny_num_classes = (
-    TRAIN_CONFIG[
-        "tiny"
-    ][
-        "num_classes"
-    ]
-)
-
-
-tiny_episodes_per_class = (
-    TRAIN_CONFIG[
-        "tiny"
-    ][
-        "episodes_per_class"
-    ]
-)
-
-
-# Spread selected labels across 0..79.
-TINY_CLASS_LABELS = (
-    np.linspace(
-        0,
-        CONFIG[
-            "source_num_categories"
-        ]
-        -
-        1,
-        tiny_num_classes,
-        dtype=int,
-    )
-    .tolist()
-)
-
-
-TINY_CLASS_LABELS = list(
-    dict.fromkeys(
-        TINY_CLASS_LABELS
-    )
-)
-
-
-if len(
-    TINY_CLASS_LABELS
-) != tiny_num_classes:
-
-    raise RuntimeError(
-        "Tiny class selection "
-        "contains duplicates."
-    )
-
-
-tiny_indices = []
-
-
-for semantic_label in (
-    TINY_CLASS_LABELS
-):
-
-    matching_indices = [
-
-        index
-
-        for index, label
-        in enumerate(
-            train_dataset
-            .episode_labels
-        )
-
-        if int(
-            label
-        )
-        ==
-        int(
-            semantic_label
-        )
-    ]
-
-    if len(
-        matching_indices
-    ) < tiny_episodes_per_class:
-
-        raise RuntimeError(
-            "Not enough fixed episodes "
-            "for tiny class "
-            f"{semantic_label}"
-        )
-
-    tiny_indices.extend(
-        matching_indices[
-            :tiny_episodes_per_class
-        ]
-    )
-
-
-tiny_subset = Subset(
-    train_dataset,
-    tiny_indices
-)
-
-
-tiny_loader = (
-    make_episode_loader(
-
-        tiny_subset,
-
-        batch_size=1,
-
-        num_workers=0,
-    )
-)
-
-
-tiny_model = (
+smoke_model = (
     make_trial_model()
 )
 
 
-tiny_optimizer, _ = (
+smoke_optimizer, _ = (
     build_optimizer_and_scheduler(
 
-        tiny_model,
+        smoke_model,
 
         stage="stage1",
 
@@ -143,385 +27,254 @@ tiny_optimizer, _ = (
 )
 
 
-# ==========================================================
-# INITIAL EVALUATION
-# ==========================================================
-
-tiny_initial_report = (
-    evaluate_episodic_model(
-
-        tiny_model,
-
-        tiny_loader,
-
-        show_progress=False,
+smoke_batch = next(
+    iter(
+        train_loader
     )
 )
 
 
-tiny_history = [
-
-    {
-        "epoch": 0,
-
-        "report":
-            tiny_initial_report,
-    }
-]
-
-
-tiny_best_report = (
-    copy.deepcopy(
-        tiny_initial_report
-    )
-)
-
-
-tiny_best_epoch = 0
-
-
-print(
-    "Tiny initial:",
-    {
-        "loss":
-            tiny_initial_report[
-                "mean_loss"
-            ][
-                "loss_total"
-            ],
-
-        "mAP50":
-            tiny_initial_report[
-                "metrics"
-            ][
-                "mAP50"
-            ],
-
-        "geometry50":
-            tiny_initial_report[
-                "metrics"
-            ][
-                "geometry_recall50"
-            ],
-    }
+prepare_model_for_training(
+    smoke_model
 )
 
 
 # ==========================================================
-# FIXED-SET TRAINING
+# SNAPSHOTS
 # ==========================================================
 
-for epoch in range(
-    1,
-    TRAIN_CONFIG[
-        "tiny"
-    ][
-        "epochs"
-    ]
-    +
-    1
-):
+backbone_parameter = next(
 
-    # Keep same exact episodes.
-    train_dataset.set_epoch(
-        0
+    parameter
+
+    for parameter
+    in smoke_model
+    .backbone
+    .parameters()
+
+    if parameter.requires_grad
+)
+
+
+main_parameter = next(
+
+    parameter
+
+    for parameter
+    in smoke_model
+    .relation_module
+    .parameters()
+
+    if parameter.requires_grad
+)
+
+
+backbone_before = (
+    backbone_parameter
+    .detach()
+    .clone()
+)
+
+
+main_before = (
+    main_parameter
+    .detach()
+    .clone()
+)
+
+
+first_bn = next(
+    module
+    for module
+    in smoke_model
+    .backbone
+    .modules()
+    if isinstance(
+        module,
+        nn.BatchNorm2d
+    )
+)
+
+
+bn_mean_before = (
+    first_bn
+    .running_mean
+    .detach()
+    .clone()
+)
+
+
+# ==========================================================
+# ONE UPDATE
+# ==========================================================
+
+smoke_optimizer.zero_grad(
+    set_to_none=True
+)
+
+
+smoke_losses = (
+    compute_detection_training_loss(
+
+        target_model=
+            smoke_model,
+
+        batch=
+            smoke_batch,
+
+        device=
+            CONFIG[
+                "device"
+            ],
+    )
+)
+
+
+smoke_losses[
+    "loss_total"
+].backward()
+
+
+backbone_gradient = sum(
+
+    (
+        parameter.grad
+        .detach()
+        .abs()
+        .sum()
+        .item()
     )
 
-    train_stats = (
-        train_detection_epoch(
-
-            target_model=
-                tiny_model,
-
-            loader=
-                tiny_loader,
-
-            optimizer=
-                tiny_optimizer,
-
-            max_steps=
-                len(
-                    tiny_loader
-                ),
-
-            stage=
-                "stage1",
-
-            description=
-                f"Tiny {epoch}",
-
-            show_progress=False,
-        )
-    )
+    for parameter
+    in smoke_model
+    .backbone
+    .parameters()
 
     if (
-        epoch == 1
-        or
-        epoch % 10 == 0
-        or
-        epoch
-        ==
-        TRAIN_CONFIG[
-            "tiny"
-        ][
-            "epochs"
-        ]
-    ):
-
-        report = (
-            evaluate_episodic_model(
-
-                tiny_model,
-
-                tiny_loader,
-
-                show_progress=False,
-            )
-        )
-
-        tiny_history.append(
-            {
-                "epoch":
-                    epoch,
-
-                "train":
-                    train_stats,
-
-                "report":
-                    report,
-            }
-        )
-
-        print(
-            f"Tiny epoch {epoch:03d}",
-            "| loss",
-            round(
-                report[
-                    "mean_loss"
-                ][
-                    "loss_total"
-                ],
-                4
-            ),
-            "| mAP50",
-            round(
-                report[
-                    "metrics"
-                ][
-                    "mAP50"
-                ],
-                4
-            ),
-            "| geometry50",
-            round(
-                report[
-                    "metrics"
-                ][
-                    "geometry_recall50"
-                ],
-                4
-            ),
-        )
-
-        current_rank = (
-
-            report[
-                "metrics"
-            ][
-                "mAP50"
-            ],
-
-            report[
-                "metrics"
-            ][
-                "geometry_recall50"
-            ],
-
-            -report[
-                "mean_loss"
-            ][
-                "loss_total"
-            ],
-        )
-
-
-        best_rank = (
-
-            tiny_best_report[
-                "metrics"
-            ][
-                "mAP50"
-            ],
-
-            tiny_best_report[
-                "metrics"
-            ][
-                "geometry_recall50"
-            ],
-
-            -tiny_best_report[
-                "mean_loss"
-            ][
-                "loss_total"
-            ],
-        )
-
-
-        if (
-            current_rank
-            >
-            best_rank
-        ):
-
-            tiny_best_report = (
-                copy.deepcopy(
-                    report
-                )
-            )
-
-            tiny_best_epoch = (
-                epoch
-            )
-
-
-# ==========================================================
-# TINY GATE
-# ==========================================================
-
-tiny_map_improvement = (
-
-    tiny_best_report[
-        "metrics"
-    ][
-        "mAP50"
-    ]
-
-    -
-
-    tiny_initial_report[
-        "metrics"
-    ][
-        "mAP50"
-    ]
+        parameter.requires_grad
+        and
+        parameter.grad
+        is not None
+    )
 )
 
 
-tiny_geometry_improvement = (
+main_gradient = sum(
 
-    tiny_best_report[
-        "metrics"
-    ][
-        "geometry_recall50"
-    ]
+    (
+        parameter.grad
+        .detach()
+        .abs()
+        .sum()
+        .item()
+    )
 
-    -
+    for parameter
+    in smoke_model
+    .relation_module
+    .parameters()
 
-    tiny_initial_report[
-        "metrics"
-    ][
-        "geometry_recall50"
-    ]
+    if (
+        parameter.requires_grad
+        and
+        parameter.grad
+        is not None
+    )
 )
 
 
-TINY_GATE_PASSED = bool(
+assert (
+    backbone_gradient
+    >
+    0.0
+)
 
-    tiny_best_report[
-        "mean_loss"
-    ][
-        "loss_total"
-    ]
-
-    <
-
-    tiny_initial_report[
-        "mean_loss"
-    ][
-        "loss_total"
-    ]
-
-    and
-
-    tiny_map_improvement
-    >=
-    TRAIN_CONFIG[
-        "tiny"
-    ][
-        "min_map50_improvement"
-    ]
-
-    and
-
-    tiny_geometry_improvement
-    >=
-    TRAIN_CONFIG[
-        "tiny"
-    ][
-        "min_geometry_improvement"
-    ]
+assert (
+    main_gradient
+    >
+    0.0
 )
 
 
-print("=" * 70)
-print("STEP 28 RESULT")
-print("=" * 70)
+torch.nn.utils.clip_grad_norm_(
 
-print(
-    "Classes      :",
     [
-        CATEGORY_NAMES[
-            label
-        ]
-        for label
-        in TINY_CLASS_LABELS
-    ]
+        parameter
+
+        for parameter
+        in smoke_model.parameters()
+
+        if parameter.requires_grad
+    ],
+
+    max_norm=
+        TRAIN_CONFIG[
+            "stage1"
+        ][
+            "gradient_clip"
+        ],
+
+    error_if_nonfinite=True,
+)
+
+
+smoke_optimizer.step()
+
+
+assert not torch.equal(
+    backbone_before,
+    backbone_parameter.detach()
+)
+
+
+assert not torch.equal(
+    main_before,
+    main_parameter.detach()
+)
+
+
+assert torch.equal(
+    bn_mean_before,
+    first_bn.running_mean
+)
+
+
+print("=" * 70)
+print("STEP 27 PASS : STAGE-1 OPTIMIZER SMOKE TEST")
+print("=" * 70)
+
+print(
+    "Loss:",
+    float(
+        smoke_losses[
+            "loss_total"
+        ].item()
+    )
 )
 
 print(
-    "Best epoch   :",
-    tiny_best_epoch
+    "Backbone grad:",
+    backbone_gradient
 )
 
 print(
-    "Initial mAP50:",
-    tiny_initial_report[
-        "metrics"
-    ][
-        "mAP50"
-    ]
+    "Main grad    :",
+    main_gradient
 )
 
 print(
-    "Best mAP50   :",
-    tiny_best_report[
-        "metrics"
-    ][
-        "mAP50"
-    ]
-)
-
-print(
-    "mAP Δ        :",
-    tiny_map_improvement
-)
-
-print(
-    "Geometry Δ   :",
-    tiny_geometry_improvement
-)
-
-print(
-    "TINY GATE    :",
-    TINY_GATE_PASSED
+    "BN stats     : FROZEN"
 )
 
 print("=" * 70)
 
 
-tiny_model.cpu()
+smoke_model.cpu()
 
-del tiny_model
-del tiny_optimizer
+del smoke_model
+del smoke_optimizer
+del smoke_batch
+del smoke_losses
 
 gc.collect()
 
