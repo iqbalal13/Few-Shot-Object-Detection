@@ -1,22 +1,7 @@
 # ==========================================================
-# STEP 25 : Generic Episodic Evaluation
-#
-# Metrics:
-#
-# mAP50
-# mAP75
-# mAP95
-# mAP@[0.50:0.95]
-# Precision @ IoU 0.50
-# Recall    @ IoU 0.50
-# Geometry Recall @ 0.50
-# Mean Best IoU
-#
-# IMPORTANT:
-# This is support-conditioned episodic mAP.
-# It is NOT official standard 80-way COCOeval.
+# STEP 25 — FULL REPLACEMENT
+# Generic episodic evaluator
 # ==========================================================
-
 
 def as_numpy(
     value
@@ -35,39 +20,53 @@ def as_numpy(
 
     return np.asarray(
         value,
-        dtype=np.float64
+        dtype=np.float64,
     )
 
 
 def numpy_box_iou(
     boxes_a,
-    boxes_b
+    boxes_b,
 ):
 
-    a = as_numpy(
-        boxes_a
-    ).reshape(
-        -1,
-        4
+    a = (
+        as_numpy(
+            boxes_a
+        )
+        .reshape(
+            -1,
+            4,
+        )
     )
 
-    b = as_numpy(
-        boxes_b
-    ).reshape(
-        -1,
-        4
+    b = (
+        as_numpy(
+            boxes_b
+        )
+        .reshape(
+            -1,
+            4,
+        )
     )
 
     if (
-        len(a) == 0
+        len(
+            a
+        ) == 0
         or
-        len(b) == 0
+        len(
+            b
+        ) == 0
     ):
 
         return np.zeros(
             (
-                len(a),
-                len(b)
+                len(
+                    a
+                ),
+                len(
+                    b
+                ),
             ),
             dtype=np.float64,
         )
@@ -75,15 +74,27 @@ def numpy_box_iou(
     # cxcywh -> xyxy
     a = np.concatenate(
         (
-            a[:, :2]
+            a[
+                :,
+                :2
+            ]
             -
-            a[:, 2:]
+            a[
+                :,
+                2:
+            ]
             /
             2,
 
-            a[:, :2]
+            a[
+                :,
+                :2
+            ]
             +
-            a[:, 2:]
+            a[
+                :,
+                2:
+            ]
             /
             2,
         ),
@@ -92,15 +103,27 @@ def numpy_box_iou(
 
     b = np.concatenate(
         (
-            b[:, :2]
+            b[
+                :,
+                :2
+            ]
             -
-            b[:, 2:]
+            b[
+                :,
+                2:
+            ]
             /
             2,
 
-            b[:, :2]
+            b[
+                :,
+                :2
+            ]
             +
-            b[:, 2:]
+            b[
+                :,
+                2:
+            ]
             /
             2,
         ),
@@ -108,50 +131,96 @@ def numpy_box_iou(
     )
 
     top_left = np.maximum(
-        a[:, None, :2],
-        b[None, :, :2],
+        a[
+            :,
+            None,
+            :2
+        ],
+        b[
+            None,
+            :,
+            :2
+        ],
     )
 
     bottom_right = np.minimum(
-        a[:, None, 2:],
-        b[None, :, 2:],
+        a[
+            :,
+            None,
+            2:
+        ],
+        b[
+            None,
+            :,
+            2:
+        ],
     )
 
     wh = np.maximum(
         0.0,
         bottom_right
         -
-        top_left
+        top_left,
     )
 
     intersection = (
-        wh[..., 0]
+        wh[
+            ...,
+            0
+        ]
         *
-        wh[..., 1]
+        wh[
+            ...,
+            1
+        ]
     )
 
-    area_a = np.maximum(
-        0.0,
-        a[:, 2:]
-        -
-        a[:, :2]
-    ).prod(
-        axis=1
+    area_a = (
+        np.maximum(
+            0.0,
+            a[
+                :,
+                2:
+            ]
+            -
+            a[
+                :,
+                :2
+            ],
+        )
+        .prod(
+            axis=1
+        )
     )
 
-    area_b = np.maximum(
-        0.0,
-        b[:, 2:]
-        -
-        b[:, :2]
-    ).prod(
-        axis=1
+    area_b = (
+        np.maximum(
+            0.0,
+            b[
+                :,
+                2:
+            ]
+            -
+            b[
+                :,
+                :2
+            ],
+        )
+        .prod(
+            axis=1
+        )
     )
 
     union = (
-        area_a[:, None]
+        area_a[
+            :,
+            None
+        ]
         +
-        area_b[None, :]
+        area_b[
+            None,
+            :
+        ]
         -
         intersection
     )
@@ -161,7 +230,7 @@ def numpy_box_iou(
         /
         np.maximum(
             union,
-            1e-12
+            1e-12,
         )
     )
 
@@ -170,76 +239,89 @@ def greedy_detection_flags(
     scores,
     pred_boxes,
     gt_boxes,
-    iou_threshold
+    iou_threshold,
 ):
 
-    scores = as_numpy(
-        scores
-    ).reshape(
-        -1
+    scores = (
+        as_numpy(
+            scores
+        )
+        .reshape(
+            -1
+        )
     )
 
-    pred_boxes = as_numpy(
-        pred_boxes
-    ).reshape(
-        -1,
-        4
+    pred_boxes = (
+        as_numpy(
+            pred_boxes
+        )
+        .reshape(
+            -1,
+            4,
+        )
     )
 
-    gt_boxes = as_numpy(
-        gt_boxes
-    ).reshape(
-        -1,
-        4
+    gt_boxes = (
+        as_numpy(
+            gt_boxes
+        )
+        .reshape(
+            -1,
+            4,
+        )
     )
 
     flags = np.zeros(
         len(
             scores
         ),
-        dtype=np.float64
+        dtype=np.float64,
     )
 
     if (
-        len(scores) == 0
+        len(
+            scores
+        ) == 0
         or
-        len(gt_boxes) == 0
+        len(
+            gt_boxes
+        ) == 0
     ):
-
         return flags
 
     ious = numpy_box_iou(
         pred_boxes,
-        gt_boxes
+        gt_boxes,
     )
 
     used_gt = set()
 
-    prediction_order = (
-        np.argsort(
-            -scores,
-            kind="stable"
-        )
+    prediction_order = np.argsort(
+        -scores,
+        kind='stable',
     )
 
-    for pred_index in prediction_order:
+    for pred_index in (
+        prediction_order
+    ):
 
-        gt_order = (
-            np.argsort(
-                -ious[
-                    pred_index
-                ],
-                kind="stable"
-            )
+        gt_order = np.argsort(
+            -ious[
+                pred_index
+            ],
+            kind='stable',
         )
 
-        for gt_index in gt_order:
+        for gt_index in (
+            gt_order
+        ):
 
             if (
                 int(
                     gt_index
                 )
-                in used_gt
+                in
+                used_gt
             ):
                 continue
 
@@ -271,19 +353,25 @@ def greedy_detection_flags(
 def average_precision_from_ranked(
     scores,
     flags,
-    total_gt
+    total_gt,
 ):
 
-    scores = as_numpy(
-        scores
-    ).reshape(
-        -1
+    scores = (
+        as_numpy(
+            scores
+        )
+        .reshape(
+            -1
+        )
     )
 
-    flags = as_numpy(
-        flags
-    ).reshape(
-        -1
+    flags = (
+        as_numpy(
+            flags
+        )
+        .reshape(
+            -1
+        )
     )
 
     total_gt = int(
@@ -291,20 +379,18 @@ def average_precision_from_ranked(
     )
 
     if total_gt <= 0:
-
         return float(
-            "nan"
+            'nan'
         )
 
     if len(
         scores
     ) == 0:
-
         return 0.0
 
     order = np.argsort(
         -scores,
-        kind="stable"
+        kind='stable',
     )
 
     tp = np.cumsum(
@@ -336,33 +422,38 @@ def average_precision_from_ranked(
             tp
             +
             fp,
-            1e-12
+            1e-12,
         )
     )
 
     mrec = np.concatenate(
         (
-            [0.0],
+            [
+                0.0
+            ],
             recall,
-            [1.0],
+            [
+                1.0
+            ],
         )
     )
 
     mpre = np.concatenate(
         (
-            [0.0],
+            [
+                0.0
+            ],
             precision,
-            [0.0],
+            [
+                0.0
+            ],
         )
     )
 
-    # precision envelope
     for index in range(
         len(
             mpre
-        )
-        -
-        2,
+        ) - 2,
         -1,
         -1,
     ):
@@ -374,24 +465,24 @@ def average_precision_from_ranked(
                 index
             ],
             mpre[
-                index
-                +
-                1
+                index + 1
             ],
         )
 
     changes = np.where(
-        mrec[1:]
+        mrec[
+            1:
+        ]
         !=
-        mrec[:-1]
+        mrec[
+            :-1
+        ]
     )[0]
 
     ap = np.sum(
         (
             mrec[
-                changes
-                +
-                1
+                changes + 1
             ]
             -
             mrec[
@@ -400,9 +491,7 @@ def average_precision_from_ranked(
         )
         *
         mpre[
-            changes
-            +
-            1
+            changes + 1
         ]
     )
 
@@ -418,38 +507,40 @@ def compute_episodic_metrics(
 ):
 
     if not records:
-
         raise ValueError(
-            "No evaluation records."
+            'No evaluation records.'
         )
 
     iou_thresholds = tuple(
         round(
-            float(value),
-            2
+            float(
+                value
+            ),
+            2,
         )
-        for value in np.arange(
+        for value
+        in np.arange(
             0.50,
             0.951,
-            0.05
+            0.05,
         )
     )
 
     labels_present = sorted({
         int(
             record[
-                "semantic_label"
+                'semantic_label'
             ]
         )
-        for record in records
+        for record
+        in records
     })
 
     # ======================================================
-    # AP PER CLASS / IoU
+    # AP per IoU / semantic episode class
     # ======================================================
 
     ap_per_iou = {}
-
     per_class_ap = {}
 
     for threshold in (
@@ -471,7 +562,7 @@ def compute_episodic_metrics(
 
                 if int(
                     record[
-                        "semantic_label"
+                        'semantic_label'
                     ]
                 )
                 ==
@@ -481,7 +572,7 @@ def compute_episodic_metrics(
             total_gt = sum(
                 len(
                     record[
-                        "gt_boxes"
+                        'gt_boxes'
                     ]
                 )
                 for record
@@ -489,7 +580,6 @@ def compute_episodic_metrics(
             )
 
             all_scores = []
-
             all_flags = []
 
             for record in (
@@ -499,7 +589,7 @@ def compute_episodic_metrics(
                 scores = (
                     as_numpy(
                         record[
-                            "scores"
+                            'scores'
                         ]
                     )
                     .reshape(
@@ -509,17 +599,13 @@ def compute_episodic_metrics(
 
                 flags = (
                     greedy_detection_flags(
-
                         scores,
-
                         record[
-                            "pred_boxes"
+                            'pred_boxes'
                         ],
-
                         record[
-                            "gt_boxes"
+                            'gt_boxes'
                         ],
-
                         threshold,
                     )
                 )
@@ -534,11 +620,8 @@ def compute_episodic_metrics(
 
             class_ap = (
                 average_precision_from_ranked(
-
                     all_scores,
-
                     all_flags,
-
                     total_gt,
                 )
             )
@@ -562,11 +645,10 @@ def compute_episodic_metrics(
         ] = class_aps
 
     # ======================================================
-    # SCORE-THRESHOLDED P/R @ IoU=0.50
+    # Fixed-threshold P/R
     # ======================================================
 
     total_gt = 0
-
     tp = 0
     fp = 0
     fn = 0
@@ -574,7 +656,6 @@ def compute_episodic_metrics(
     geometry_hits50 = 0
 
     best_ious_all_gt = []
-
     maximum_scores = []
 
     for record in records:
@@ -582,7 +663,7 @@ def compute_episodic_metrics(
         scores = (
             as_numpy(
                 record[
-                    "scores"
+                    'scores'
                 ]
             )
             .reshape(
@@ -593,24 +674,24 @@ def compute_episodic_metrics(
         pred_boxes = (
             as_numpy(
                 record[
-                    "pred_boxes"
+                    'pred_boxes'
                 ]
             )
             .reshape(
                 -1,
-                4
+                4,
             )
         )
 
         gt_boxes = (
             as_numpy(
                 record[
-                    "gt_boxes"
+                    'gt_boxes'
                 ]
             )
             .reshape(
                 -1,
-                4
+                4,
             )
         )
 
@@ -627,10 +708,6 @@ def compute_episodic_metrics(
                     scores.max()
                 )
             )
-
-        # ----------------------------------------------
-        # Thresholded precision / recall
-        # ----------------------------------------------
 
         keep = (
             scores
@@ -652,13 +729,9 @@ def compute_episodic_metrics(
 
         threshold_flags = (
             greedy_detection_flags(
-
                 kept_scores,
-
                 kept_boxes,
-
                 gt_boxes,
-
                 primary_iou_threshold,
             )
         )
@@ -685,27 +758,20 @@ def compute_episodic_metrics(
             episode_tp
         )
 
-        # ----------------------------------------------
-        # Geometry independent of score threshold.
-        # ----------------------------------------------
-
+        # Geometry independent of confidence.
         if (
             len(
                 pred_boxes
-            )
-            > 0
+            ) > 0
             and
             len(
                 gt_boxes
-            )
-            > 0
+            ) > 0
         ):
 
-            ious = (
-                numpy_box_iou(
-                    pred_boxes,
-                    gt_boxes
-                )
+            ious = numpy_box_iou(
+                pred_boxes,
+                gt_boxes,
             )
 
             best_per_gt = (
@@ -754,7 +820,7 @@ def compute_episodic_metrics(
         /
         max(
             tp + fp,
-            1
+            1,
         )
     )
 
@@ -763,7 +829,7 @@ def compute_episodic_metrics(
         /
         max(
             total_gt,
-            1
+            1,
         )
     )
 
@@ -772,7 +838,7 @@ def compute_episodic_metrics(
         /
         max(
             total_gt,
-            1
+            1,
         )
     )
 
@@ -808,7 +874,7 @@ def compute_episodic_metrics(
             label,
             str(
                 label
-            )
+            ),
         ):
             float(
                 value
@@ -822,42 +888,42 @@ def compute_episodic_metrics(
 
     return {
 
-        "mAP50":
+        'mAP50':
             float(
                 mAP50
             ),
 
-        "mAP75":
+        'mAP75':
             float(
                 mAP75
             ),
 
-        "mAP95":
+        'mAP95':
             float(
                 mAP95
             ),
 
-        "mAP50_95":
+        'mAP50_95':
             float(
                 mAP50_95
             ),
 
-        "precision50":
+        'precision50':
             float(
                 precision50
             ),
 
-        "recall50":
+        'recall50':
             float(
                 recall50
             ),
 
-        "geometry_recall50":
+        'geometry_recall50':
             float(
                 geometry_recall50
             ),
 
-        "mean_best_iou":
+        'mean_best_iou':
             float(
                 np.mean(
                     best_ious_all_gt
@@ -868,7 +934,7 @@ def compute_episodic_metrics(
                 0.0
             ),
 
-        "mean_max_score":
+        'mean_max_score':
             float(
                 np.mean(
                     maximum_scores
@@ -879,47 +945,49 @@ def compute_episodic_metrics(
                 0.0
             ),
 
-        "tp":
+        'tp':
             int(
                 tp
             ),
 
-        "fp":
+        'fp':
             int(
                 fp
             ),
 
-        "fn":
+        'fn':
             int(
                 fn
             ),
 
-        "total_gt":
+        'total_gt':
             int(
                 total_gt
             ),
 
-        "classes_evaluated":
+        'classes_evaluated':
             len(
                 labels_present
             ),
 
-        "mAP_by_iou": {
-            f"{threshold:.2f}":
+        'mAP_by_iou': {
+
+            f'{threshold:.2f}':
                 float(
                     value
                 )
+
             for threshold, value
             in ap_per_iou.items()
         },
 
-        "AP50_per_class":
+        'AP50_per_class':
             per_class_ap50,
     }
 
 
 # ==========================================================
-# MODEL EVALUATOR
+# Evaluator
 # ==========================================================
 
 @torch.no_grad()
@@ -935,30 +1003,30 @@ def evaluate_episodic_model(
     records = []
 
     loss_totals = {
+        'loss_cls':
+            0.0,
 
-        "loss_cls": 0.0,
+        'loss_bbox':
+            0.0,
 
-        "loss_bbox": 0.0,
+        'loss_giou':
+            0.0,
 
-        "loss_giou": 0.0,
-
-        "loss_total": 0.0,
+        'loss_total':
+            0.0,
     }
 
     batch_count = 0
 
     iterator = data_loader
 
-    if (
-        max_batches
-        is not None
-    ):
+    if max_batches is not None:
 
         iterator = islice(
             iterator,
             int(
                 max_batches
-            )
+            ),
         )
 
     if show_progress:
@@ -983,7 +1051,7 @@ def evaluate_episodic_model(
         iterator = tqdm(
             iterator,
             total=total,
-            desc="Evaluation",
+            desc='Evaluation',
         )
 
     for batch in iterator:
@@ -994,10 +1062,11 @@ def evaluate_episodic_model(
 
         support_images = (
             batch[
-                "support_images"
-            ].to(
+                'support_images'
+            ]
+            .to(
                 CONFIG[
-                    "device"
+                    'device'
                 ],
                 non_blocking=True,
             )
@@ -1005,10 +1074,11 @@ def evaluate_episodic_model(
 
         support_padding_masks = (
             batch[
-                "support_padding_masks"
-            ].to(
+                'support_padding_masks'
+            ]
+            .to(
                 CONFIG[
-                    "device"
+                    'device'
                 ],
                 non_blocking=True,
             )
@@ -1016,10 +1086,11 @@ def evaluate_episodic_model(
 
         query_images = (
             batch[
-                "query_images"
-            ].to(
+                'query_images'
+            ]
+            .to(
                 CONFIG[
-                    "device"
+                    'device'
                 ],
                 non_blocking=True,
             )
@@ -1027,10 +1098,11 @@ def evaluate_episodic_model(
 
         query_padding_masks = (
             batch[
-                "query_padding_masks"
-            ].to(
+                'query_padding_masks'
+            ]
+            .to(
                 CONFIG[
-                    "device"
+                    'device'
                 ],
                 non_blocking=True,
             )
@@ -1039,26 +1111,30 @@ def evaluate_episodic_model(
         targets = (
             move_targets_to_device(
                 batch[
-                    "query_targets"
+                    'query_targets'
                 ],
                 CONFIG[
-                    "device"
+                    'device'
                 ],
             )
         )
 
-        outputs = target_model(
-            support_images,
-            query_images,
-            support_padding_mask=
-                support_padding_masks,
-            query_padding_mask=
-                query_padding_masks,
+        outputs = (
+            target_model(
+                support_images,
+                query_images,
+
+                support_padding_mask=
+                    support_padding_masks,
+
+                query_padding_mask=
+                    query_padding_masks,
+            )
         )
 
         losses = criterion(
             outputs,
-            targets
+            targets,
         )
 
         for key in (
@@ -1076,7 +1152,7 @@ def evaluate_episodic_model(
 
         scores = (
             outputs[
-                "pred_logits"
+                'pred_logits'
             ]
             .sigmoid()
             .squeeze(
@@ -1086,7 +1162,7 @@ def evaluate_episodic_model(
 
         pred_boxes = (
             outputs[
-                "pred_boxes"
+                'pred_boxes'
             ]
         )
 
@@ -1096,7 +1172,7 @@ def evaluate_episodic_model(
 
             semantic_label = int(
                 batch[
-                    "episode_classes"
+                    'episode_classes'
                 ][
                     batch_index
                 ].item()
@@ -1104,28 +1180,28 @@ def evaluate_episodic_model(
 
             records.append(
                 {
-                    "semantic_label":
+                    'semantic_label':
                         semantic_label,
 
-                    "scores":
+                    'scores':
                         scores[
                             batch_index
                         ]
                         .detach()
                         .cpu(),
 
-                    "pred_boxes":
+                    'pred_boxes':
                         pred_boxes[
                             batch_index
                         ]
                         .detach()
                         .cpu(),
 
-                    "gt_boxes":
+                    'gt_boxes':
                         targets[
                             batch_index
                         ][
-                            "boxes"
+                            'boxes'
                         ]
                         .detach()
                         .cpu(),
@@ -1135,10 +1211,8 @@ def evaluate_episodic_model(
         batch_count += 1
 
     if batch_count == 0:
-
         raise RuntimeError(
-            "Evaluation loader "
-            "produced no batches."
+            'Evaluation loader produced no batches.'
         )
 
     metrics = (
@@ -1148,19 +1222,19 @@ def evaluate_episodic_model(
 
             score_threshold=
                 TRAIN_CONFIG[
-                    "score_threshold"
+                    'score_threshold'
                 ],
 
             primary_iou_threshold=
                 TRAIN_CONFIG[
-                    "primary_iou_threshold"
+                    'primary_iou_threshold'
                 ],
         )
     )
 
     return {
 
-        "mean_loss": {
+        'mean_loss': {
 
             key:
                 value
@@ -1171,25 +1245,28 @@ def evaluate_episodic_model(
             in loss_totals.items()
         },
 
-        "metrics":
+        'metrics':
             metrics,
 
-        "episodes":
+        'episodes':
             len(
                 records
             ),
     }
 
 
-print("=" * 70)
-print("STEP 25 : GENERIC EPISODIC EVALUATOR READY")
-print("=" * 70)
+print('=' * 70)
+print('STEP 25 : GENERIC EPISODIC EVALUATOR READY')
+print('=' * 70)
 
 print(
-    "Primary: AP50 + Precision@0.50 + Recall@0.50"
-)
-print(
-    "Diagnostics: mAP75 / mAP95 / mAP50:95 / Geometry50"
+    'Primary: AP50 + '
+    'Precision@0.50 + Recall@0.50'
 )
 
-print("=" * 70)
+print(
+    'Diagnostics: mAP75 / mAP95 / '
+    'mAP50:95 / Geometry50'
+)
+
+print('=' * 70)
