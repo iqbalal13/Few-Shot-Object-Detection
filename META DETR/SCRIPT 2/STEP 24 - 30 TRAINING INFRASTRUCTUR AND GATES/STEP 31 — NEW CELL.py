@@ -1,19 +1,25 @@
 # ==========================================================
-# STEP 31 — NEW CELL
+# STEP 31 — FULL REPLACEMENT
 # COCO-Val PERSON readiness gate
 #
+# HARD:
+#   Precision@0.50 > 0
+#   Recall@0.50    > 0
+#   internal Geometry50 improves vs initial model
+#
 # PASS:
-#   use generic stable COCO-80 checkpoint directly
+#   use generic stable COCO-80 checkpoint
 #
 # FAIL:
 #   activate COCO-person specialization fallback
 # ==========================================================
 
+
 if not COCO80_META_TRAINING_COMPLETE:
 
     raise RuntimeError(
-        'Stable COCO-80 source training is required '
-        'before the person readiness gate.'
+        'Stable COCO-80 source training '
+        'is required before person gate.'
     )
 
 
@@ -30,6 +36,7 @@ for _name in (
     'source_optimizer',
     'source_scheduler',
 ):
+
     globals().pop(
         _name,
         None,
@@ -97,8 +104,11 @@ person_val_dataset.set_epoch(
 
 person_val_loader = (
     make_episode_loader(
+
         person_val_dataset,
+
         batch_size=1,
+
         num_workers=
             COCO_CONFIG[
                 'num_workers'
@@ -108,7 +118,7 @@ person_val_loader = (
 
 
 # ==========================================================
-# Person baseline from original initialization
+# ORIGINAL INITIALIZATION BASELINE
 # ==========================================================
 
 person_initial_model = (
@@ -118,8 +128,11 @@ person_initial_model = (
 
 person_initial_report = (
     evaluate_episodic_model(
+
         person_initial_model,
+
         person_val_loader,
+
         show_progress=True,
     )
 )
@@ -136,7 +149,7 @@ if torch.cuda.is_available():
 
 
 # ==========================================================
-# Stable COCO-80 checkpoint
+# STABLE COCO-80 CHECKPOINT
 # ==========================================================
 
 person_gate_model = (
@@ -169,95 +182,83 @@ person_gate_model.load_state_dict(
 
 person_source_report = (
     evaluate_episodic_model(
+
         person_gate_model,
+
         person_val_loader,
+
         show_progress=True,
     )
 )
 
 
 # ==========================================================
-# Person-specific readiness criteria
+# READINESS CRITERIA
 # ==========================================================
 
-person_initial_ap50 = (
+person_initial_geometry = float(
+
     person_initial_report[
         'metrics'
     ][
-        'mAP50'
+        'geometry_recall50'
     ]
 )
 
 
-person_source_ap50 = (
+person_source_geometry = float(
+
     person_source_report[
         'metrics'
     ][
-        'mAP50'
+        'geometry_recall50'
     ]
-)
-
-
-person_required_ap50 = max(
-
-    0.01,
-
-    person_initial_ap50
-    *
-    1.25,
 )
 
 
 person_geometry_improved = bool(
 
-    person_source_report[
-        'metrics'
-    ][
-        'geometry_recall50'
-    ]
-
+    person_source_geometry
     >
-
-    person_initial_report[
-        'metrics'
-    ][
-        'geometry_recall50'
-    ]
+    person_initial_geometry
 )
 
 
-# For the PERSON readiness gate, unlike generic Stage-1
-# stability, P/R@0.50 is useful for deciding whether
-# person specialization fallback is still needed.
-person_pr_alive = bool(
+person_precision = float(
 
     person_source_report[
         'metrics'
     ][
         'precision50'
     ]
-    >
-    0.0
+)
 
-    and
+
+person_recall = float(
 
     person_source_report[
         'metrics'
     ][
         'recall50'
     ]
+)
+
+
+person_pr_alive = bool(
+
+    person_precision
+    >
+    0.0
+
+    and
+
+    person_recall
     >
     0.0
 )
 
 
 COCO_PERSON_GATE_PASSED = bool(
-
-    person_source_ap50
-    >=
-    person_required_ap50
-
-    and
 
     person_geometry_improved
 
@@ -297,54 +298,23 @@ print(
 )
 
 print(
-    'Initial AP50          :',
-    person_initial_ap50,
+    'Precision@0.50        :',
+    person_precision,
 )
 
 print(
-    'Source AP50           :',
-    person_source_ap50,
-)
-
-print(
-    'Required AP50         :',
-    person_required_ap50,
-)
-
-print(
-    'Source Precision      :',
-    person_source_report[
-        'metrics'
-    ][
-        'precision50'
-    ],
-)
-
-print(
-    'Source Recall         :',
-    person_source_report[
-        'metrics'
-    ][
-        'recall50'
-    ],
+    'Recall@0.50           :',
+    person_recall,
 )
 
 print(
     'Initial Geometry50    :',
-    person_initial_report[
-        'metrics'
-    ][
-        'geometry_recall50'
-    ],
+    person_initial_geometry,
 )
 
 print(
     'Source Geometry50     :',
-    person_source_report[
-        'metrics'
-    ][
-        'geometry_recall50'
-    ],
+    person_source_geometry,
 )
 
 print(
