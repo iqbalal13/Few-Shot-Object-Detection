@@ -1,10 +1,13 @@
 # ==========================================================
-# STEP 17 : COCO-80 Episodic Dataset + Letterbox Sanity
+# STEP 17 — FULL REPLACEMENT
+# Letterbox / bbox / mask sanity
 # ==========================================================
 
 import matplotlib.pyplot as plt
 
-from matplotlib.patches import Rectangle
+from matplotlib.patches import (
+    Rectangle
+)
 
 
 def display_tensor_image(
@@ -18,7 +21,7 @@ def display_tensor_image(
         .permute(
             1,
             2,
-            0
+            0,
         )
         .numpy()
     )
@@ -38,7 +41,7 @@ def display_tensor_image(
     return np.clip(
         array,
         0.0,
-        1.0
+        1.0,
     )
 
 
@@ -47,18 +50,15 @@ train_dataset.set_epoch(
 )
 
 
-# ==========================================================
-# STRUCTURAL + GEOMETRY CHECK
-# ==========================================================
-
 seen_classes = set()
+
 
 for index in range(
     min(
         160,
         len(
             train_dataset
-        )
+        ),
     )
 ):
 
@@ -70,7 +70,7 @@ for index in range(
 
     semantic_label = int(
         episode[
-            "episode_class"
+            'episode_class'
         ].item()
     )
 
@@ -80,19 +80,19 @@ for index in range(
 
     support_target = (
         episode[
-            "support_target"
+            'support_target'
         ]
     )
 
     query_target = (
         episode[
-            "query_target"
+            'query_target'
         ]
     )
 
     assert (
         support_target[
-            "semantic_label"
+            'semantic_label'
         ].item()
         ==
         semantic_label
@@ -100,7 +100,7 @@ for index in range(
 
     assert (
         query_target[
-            "semantic_label"
+            'semantic_label'
         ].item()
         ==
         semantic_label
@@ -108,71 +108,76 @@ for index in range(
 
     assert (
         support_target[
-            "image_id"
+            'image_id'
         ].item()
         !=
         query_target[
-            "image_id"
+            'image_id'
         ].item()
     )
 
     assert tuple(
         episode[
-            "support_image"
+            'support_image'
         ].shape[-2:]
     ) == (
-        CONFIG["image_size"],
-        CONFIG["image_size"],
+        CONFIG['image_size'],
+        CONFIG['image_size'],
     )
 
     assert tuple(
         episode[
-            "query_image"
+            'query_image'
         ].shape[-2:]
     ) == (
-        CONFIG["image_size"],
-        CONFIG["image_size"],
+        CONFIG['image_size'],
+        CONFIG['image_size'],
     )
 
     for mask_key in (
-        "support_padding_mask",
-        "query_padding_mask",
+        'support_padding_mask',
+        'query_padding_mask',
     ):
 
-        mask = episode[
-            mask_key
-        ]
+        mask = (
+            episode[
+                mask_key
+            ]
+        )
 
-        assert mask.dtype == torch.bool
+        assert (
+            mask.dtype
+            ==
+            torch.bool
+        )
 
         assert tuple(
             mask.shape
         ) == (
-            CONFIG["image_size"],
-            CONFIG["image_size"],
+            CONFIG['image_size'],
+            CONFIG['image_size'],
         )
 
-        # Every sample must contain valid image area.
         assert bool(
-            (~mask).any()
+            (
+                ~mask
+            ).any()
         )
 
     assert (
         len(
             query_target[
-                "boxes"
+                'boxes'
             ]
         )
         >
         0
     )
 
-    # Detection labels are binary foreground
-    # relative to support.
     assert bool(
         (
             query_target[
-                "labels"
+                'labels'
             ]
             ==
             0
@@ -181,7 +186,7 @@ for index in range(
 
     boxes = (
         query_target[
-            "boxes"
+            'boxes'
         ]
     )
 
@@ -201,17 +206,29 @@ for index in range(
     )
 
     xy_min = (
-        boxes[:, :2]
+        boxes[
+            :,
+            :2
+        ]
         -
-        boxes[:, 2:]
+        boxes[
+            :,
+            2:
+        ]
         /
         2
     )
 
     xy_max = (
-        boxes[:, :2]
+        boxes[
+            :,
+            :2
+        ]
         +
-        boxes[:, 2:]
+        boxes[
+            :,
+            2:
+        ]
         /
         2
     )
@@ -236,40 +253,54 @@ for index in range(
 
 
 print(
-    "Semantic classes observed "
-    "in first sanity window:",
+    'Semantic classes observed in first sanity window:',
     len(
         seen_classes
-    )
+    ),
 )
 
 
 # ==========================================================
-# VISUALIZE A FEW DIFFERENT CLASSES
+# Visualize four distinct classes
 # ==========================================================
 
 visual_indices = []
+
 used_labels = set()
 
+
 for index, label in enumerate(
-    train_dataset.episode_labels
+    train_dataset
+    .episode_labels
 ):
 
     if label not in used_labels:
-        visual_indices.append(index)
-        used_labels.add(label)
 
-    if len(visual_indices) >= 4:
+        visual_indices.append(
+            index
+        )
+
+        used_labels.add(
+            label
+        )
+
+    if len(
+        visual_indices
+    ) >= 4:
         break
 
 
 for index in visual_indices:
 
-    episode = train_dataset[index]
+    episode = (
+        train_dataset[
+            index
+        ]
+    )
 
     semantic_label = int(
         episode[
-            "episode_class"
+            'episode_class'
         ].item()
     )
 
@@ -282,44 +313,50 @@ for index in visual_indices:
     fig, axes = plt.subplots(
         1,
         2,
-        figsize=(12, 6)
+        figsize=(
+            12,
+            6,
+        ),
     )
 
     axes[0].imshow(
         display_tensor_image(
             episode[
-                "support_image"
+                'support_image'
             ]
         )
     )
 
     axes[0].set_title(
-        f"Support letterbox: {category_name}"
+        f'Support letterbox: {category_name}'
     )
 
     axes[1].imshow(
         display_tensor_image(
             episode[
-                "query_image"
+                'query_image'
             ]
         )
     )
 
-    height, width = (
-        episode[
-            "query_image"
-        ].shape[-2:]
-    )
+    (
+        height,
+        width,
+
+    ) = episode[
+        'query_image'
+    ].shape[-2:]
 
     for (
         cx,
         cy,
         w,
-        h
+        h,
+
     ) in episode[
-        "query_target"
+        'query_target'
     ][
-        "boxes"
+        'boxes'
     ].tolist():
 
         axes[1].add_patch(
@@ -341,26 +378,39 @@ for index in visual_indices:
                     *
                     height,
                 ),
-                w * width,
-                h * height,
+
+                w
+                *
+                width,
+
+                h
+                *
+                height,
+
                 fill=False,
                 linewidth=2,
             )
         )
 
     axes[1].set_title(
-        "Query letterbox: all "
-        f"{category_name} GT"
+        f'Query letterbox: all {category_name} GT'
     )
 
     for axis in axes:
-        axis.axis("off")
+        axis.axis(
+            'off'
+        )
 
     plt.tight_layout()
     plt.show()
-    plt.close(fig)
+    plt.close(
+        fig
+    )
 
 
-print("=" * 70)
-print("STEP 17 PASS : LETTERBOX + BBOX + MASK SANITY VALID")
-print("=" * 70)
+print('=' * 70)
+print(
+    'STEP 17 PASS : LETTERBOX + BBOX + '
+    'MASK SANITY VALID'
+)
+print('=' * 70)
