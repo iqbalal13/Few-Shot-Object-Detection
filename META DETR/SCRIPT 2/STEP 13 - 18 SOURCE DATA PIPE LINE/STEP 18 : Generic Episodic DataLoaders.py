@@ -1,9 +1,6 @@
 # ==========================================================
-# STEP 18 : Generic Episodic DataLoaders
-#
-# Physical batch remains 1.
-# Effective Stage-1 meta-batch becomes 4 through gradient
-# accumulation in STEP 24. Validation stays batch size 1.
+# STEP 18 — FULL REPLACEMENT
+# Mask-aware episodic DataLoaders
 # ==========================================================
 
 from torch.utils.data import (
@@ -18,60 +15,77 @@ def episodic_collate_fn(
 
     return {
 
-        "support_images":
-            torch.stack([
-                item[
-                    "support_image"
+        'support_images':
+            torch.stack(
+                [
+                    item[
+                        'support_image'
+                    ]
+                    for item
+                    in batch
                 ]
-                for item in batch
-            ]),
+            ),
 
-        "support_padding_masks":
-            torch.stack([
-                item[
-                    "support_padding_mask"
+        'support_padding_masks':
+            torch.stack(
+                [
+                    item[
+                        'support_padding_mask'
+                    ]
+                    for item
+                    in batch
                 ]
-                for item in batch
-            ]),
+            ),
 
-        "query_images":
-            torch.stack([
-                item[
-                    "query_image"
+        'query_images':
+            torch.stack(
+                [
+                    item[
+                        'query_image'
+                    ]
+                    for item
+                    in batch
                 ]
-                for item in batch
-            ]),
+            ),
 
-        "query_padding_masks":
-            torch.stack([
-                item[
-                    "query_padding_mask"
+        'query_padding_masks':
+            torch.stack(
+                [
+                    item[
+                        'query_padding_mask'
+                    ]
+                    for item
+                    in batch
                 ]
-                for item in batch
-            ]),
+            ),
 
-        "episode_classes":
-            torch.stack([
-                item[
-                    "episode_class"
+        'episode_classes':
+            torch.stack(
+                [
+                    item[
+                        'episode_class'
+                    ]
+                    for item
+                    in batch
                 ]
-                for item in batch
-            ]),
+            ),
 
-        "support_targets":
+        'support_targets':
             [
                 item[
-                    "support_target"
+                    'support_target'
                 ]
-                for item in batch
+                for item
+                in batch
             ],
 
-        "query_targets":
+        'query_targets':
             [
                 item[
-                    "query_target"
+                    'query_target'
                 ]
-                for item in batch
+                for item
+                in batch
             ],
     }
 
@@ -83,18 +97,16 @@ def make_episode_loader(
 ):
 
     if batch_size is None:
-
         batch_size = (
             COCO_CONFIG[
-                "batch_size"
+                'batch_size'
             ]
         )
 
     if num_workers is None:
-
         num_workers = (
             COCO_CONFIG[
-                "num_workers"
+                'num_workers'
             ]
         )
 
@@ -102,23 +114,22 @@ def make_episode_loader(
 
         dataset,
 
-        batch_size=int(
-            batch_size
-        ),
+        batch_size=
+            int(
+                batch_size
+            ),
 
-        # Episode class ordering is already
-        # deterministically shuffled inside dataset.
         shuffle=False,
 
-        num_workers=int(
-            num_workers
-        ),
+        num_workers=
+            int(
+                num_workers
+            ),
 
-        pin_memory=(
+        pin_memory=
             COCO_CONFIG[
-                "pin_memory"
-            ]
-        ),
+                'pin_memory'
+            ],
 
         persistent_workers=False,
 
@@ -127,19 +138,25 @@ def make_episode_loader(
     )
 
 
-train_loader = make_episode_loader(
-    train_dataset,
-    batch_size=1,
+# Physical loader batch remains 1.
+# Effective Stage-1 batch = 4 via accumulation in STEP 24.
+train_loader = (
+    make_episode_loader(
+        train_dataset,
+        batch_size=1,
+    )
 )
 
-val_loader = make_episode_loader(
-    val_dataset,
-    batch_size=1,
+val_loader = (
+    make_episode_loader(
+        val_dataset,
+        batch_size=1,
+    )
 )
 
 
 # ==========================================================
-# LOADER SANITY
+# Loader sanity
 # ==========================================================
 
 _loader_batch = next(
@@ -148,9 +165,10 @@ _loader_batch = next(
     )
 )
 
+
 assert (
     _loader_batch[
-        "support_images"
+        'support_images'
     ].ndim
     ==
     4
@@ -158,7 +176,7 @@ assert (
 
 assert (
     _loader_batch[
-        "query_images"
+        'query_images'
     ].ndim
     ==
     4
@@ -166,7 +184,7 @@ assert (
 
 assert (
     _loader_batch[
-        "support_padding_masks"
+        'support_padding_masks'
     ].ndim
     ==
     3
@@ -174,7 +192,7 @@ assert (
 
 assert (
     _loader_batch[
-        "query_padding_masks"
+        'query_padding_masks'
     ].ndim
     ==
     3
@@ -182,7 +200,7 @@ assert (
 
 assert (
     _loader_batch[
-        "query_padding_masks"
+        'query_padding_masks'
     ].dtype
     ==
     torch.bool
@@ -191,24 +209,29 @@ assert (
 assert (
     len(
         _loader_batch[
-            "query_targets"
+            'query_targets'
         ]
     )
     ==
     _loader_batch[
-        "query_images"
+        'query_images'
     ].shape[0]
 )
 
 
-print("=" * 70)
-print("STEP 18 : MASK-AWARE EPISODIC DATALOADERS READY")
-print("=" * 70)
-print("Train batches        :", len(train_loader))
-print("Val batches          :", len(val_loader))
-print("Physical batch size  :", 1)
-print("Effective Stage1 batch: set in STEP 24")
-print("=" * 70)
+print('=' * 70)
+print(
+    'STEP 18 : MASK-AWARE EPISODIC '
+    'DATALOADERS READY'
+)
+print('=' * 70)
+
+print('Train batches         :', len(train_loader))
+print('Val batches           :', len(val_loader))
+print('Physical batch size   :', 1)
+print('Effective Stage1 batch: set in STEP 24')
+
+print('=' * 70)
 
 
 del _loader_batch
