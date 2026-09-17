@@ -1,126 +1,103 @@
 # ==========================================================
-# STEP 30 : FULL COCO-80 EPISODIC META-TRAINING
-#
-# STAGE 1 — stabilized source training
-#
-# LOCKED:
-#   Primary checkpoint criterion = AP50
-#
-#   Precision / Recall remain reported final metrics
-#   but are NOT hard source-training gates.
-#
-#   Geometry and loss remain diagnostics.
-#
-# FULL-RUN PASS requires:
-#   - genuine improvement over initialization
-#   - AP50 >= required floor
-#   - stable tail >= 80% of best AP50
-#
-# Precision/Recall @ score 0.50 are monitored but do not
-# invalidate an otherwise stable source representation.
-# ==========================================================
-
-
-# ==========================================================
-# REQUIRE SHORT GENERALIZATION PASS
+# STEP 30 — FULL REPLACEMENT
+# Full stabilized COCO-80 episodic meta-training
 # ==========================================================
 
 if not COCO80_GENERALIZATION_GATE_PASSED:
+
     raise RuntimeError(
-        "STEP 29 COCO-80 stability/generalization gate failed. "
-        "Do not start full source training."
+        'STEP 29 COCO-80 stability/generalization '
+        'gate failed. Do not start full source training.'
     )
 
 
-# ==========================================================
-# FRESH MODEL
-#
-# IMPORTANT:
-# Step 30 starts from original initialization.
-# Step-29 weights are NOT reused.
-# ==========================================================
+# Fresh initialization.
+source_model = (
+    make_trial_model()
+)
 
-source_model = make_trial_model()
-
-
-# ==========================================================
-# FULL TRAINING SCHEDULE
-# ==========================================================
 
 source_total_updates = (
     TRAIN_CONFIG[
-        "stage1"
+        'stage1'
     ][
-        "epochs"
+        'epochs'
     ]
     *
     TRAIN_CONFIG[
-        "stage1"
+        'stage1'
     ][
-        "steps_per_epoch"
+        'steps_per_epoch'
     ]
 )
 
 
 source_optimizer, source_scheduler = (
     build_optimizer_and_scheduler(
+
         source_model,
-        stage="stage1",
+
+        stage='stage1',
+
         use_scheduler=True,
-        total_updates=source_total_updates,
+
+        total_updates=
+            source_total_updates,
     )
 )
 
 
 # ==========================================================
-# INITIAL VALIDATION
+# Initial validation
 # ==========================================================
 
-val_dataset.set_epoch(0)
+val_dataset.set_epoch(
+    0
+)
 
 
-source_initial_report = evaluate_episodic_model(
-    source_model,
-    val_loader,
-    show_progress=True,
+source_initial_report = (
+    evaluate_episodic_model(
+        source_model,
+        val_loader,
+        show_progress=True,
+    )
 )
 
 
 if (
     source_initial_report[
-        "metrics"
+        'metrics'
     ][
-        "classes_evaluated"
+        'classes_evaluated'
     ]
     !=
     80
 ):
     raise RuntimeError(
-        "Initial full validation does not cover all 80 classes."
+        'Initial full validation does not cover '
+        'all 80 classes.'
     )
 
 
 source_history = []
 
-source_best_report = copy.deepcopy(
-    source_initial_report
+
+source_best_report = (
+    copy.deepcopy(
+        source_initial_report
+    )
 )
+
 
 source_best_epoch = 0
 
 
-# ==========================================================
-# FULL-RUN AP50 FLOOR
-#
-# Same logic as short gate, but recomputed against the
-# fresh Step-30 initialization.
-# ==========================================================
-
 source_initial_map50 = (
     source_initial_report[
-        "metrics"
+        'metrics'
     ][
-        "mAP50"
+        'mAP50'
     ]
 )
 
@@ -128,23 +105,23 @@ source_initial_map50 = (
 source_required_map50 = max(
 
     TRAIN_CONFIG[
-        "short"
+        'short'
     ][
-        "absolute_map50_floor"
+        'absolute_map50_floor'
     ],
 
     source_initial_map50
     *
     TRAIN_CONFIG[
-        "short"
+        'short'
     ][
-        "relative_factor"
+        'relative_factor'
     ],
 )
 
 
 # ==========================================================
-# CHECKPOINT HELPERS
+# Checkpoint helpers
 # ==========================================================
 
 def checkpoint_config_snapshot():
@@ -153,14 +130,15 @@ def checkpoint_config_snapshot():
 
         key:
             (
-                str(value)
-
+                str(
+                    value
+                )
                 if isinstance(
                     value,
-                    torch.device
+                    torch.device,
                 )
-
-                else copy.deepcopy(
+                else
+                copy.deepcopy(
                     value
                 )
             )
@@ -181,72 +159,72 @@ def save_source_checkpoint(
 
     payload = {
 
-        "stage":
-            "COCO80_META_TRAINING",
+        'stage':
+            'COCO80_META_TRAINING',
 
-        "epoch":
-            int(epoch),
-
-        "model_state":
-            target_model.state_dict(),
-
-        "optimizer_state":
-            optimizer.state_dict(),
-
-        "scheduler_state":
-            (
-                scheduler.state_dict()
-
-                if scheduler is not None
-
-                else None
+        'epoch':
+            int(
+                epoch
             ),
 
-        "val_report":
+        'model_state':
+            target_model.state_dict(),
+
+        'optimizer_state':
+            optimizer.state_dict(),
+
+        'scheduler_state':
+            (
+                scheduler.state_dict()
+                if scheduler
+                is not None
+                else
+                None
+            ),
+
+        'val_report':
             copy.deepcopy(
                 val_report
             ),
 
-        "model_config":
+        'model_config':
             checkpoint_config_snapshot(),
 
-        "train_config":
+        'train_config':
             copy.deepcopy(
                 TRAIN_CONFIG
             ),
 
-        "research_protocol":
+        'research_protocol':
             copy.deepcopy(
                 RESEARCH_PROTOCOL
             ),
 
-        "freeze_policy":
+        'freeze_policy':
             (
-                "Stage1: all model parameters trainable; "
-                "ResNet-101 lower LR; BN running statistics frozen; "
-                "effective episodic batch=4 by gradient accumulation."
+                'Stage1: all model parameters trainable; '
+                'ResNet-101 lower LR; BN running statistics '
+                'frozen; effective episodic batch=4 by '
+                'gradient accumulation.'
             ),
 
-        "preprocessing":
+        'preprocessing':
             (
-                "aspect-ratio-preserving letterbox "
-                "640x640 + padding masks"
+                'aspect-ratio-preserving letterbox '
+                '640x640 + padding masks'
             ),
     }
-
 
     temporary_path = (
         path
         +
-        ".tmp"
+        '.tmp'
     )
-
 
     torch.save(
         payload,
         temporary_path,
     )
-
 
     os.replace(
         temporary_path,
@@ -254,302 +232,273 @@ def save_source_checkpoint(
     )
 
 
-# ==========================================================
-# SAVE EPOCH-0 DIAGNOSTIC CHECKPOINT
-# ==========================================================
-
+# Epoch-0 diagnostic checkpoint.
 save_source_checkpoint(
+
     os.path.join(
         COCO80_CHECKPOINT_DIR,
-        "coco80_meta_initial.pth",
+        'coco80_meta_initial.pth',
     ),
+
     0,
+
     source_model,
+
     source_optimizer,
+
     source_scheduler,
+
     source_initial_report,
 )
 
 
-print("=" * 70)
-print("STEP 30 : FULL STABILIZED COCO-80 META-TRAINING")
-print("=" * 70)
+print('=' * 70)
+print('STEP 30 : FULL STABILIZED COCO-80 META-TRAINING')
+print('=' * 70)
 
 print(
-    "Initial AP50        :",
+    'Initial AP50      :',
     source_initial_report[
-        "metrics"
+        'metrics'
     ][
-        "mAP50"
+        'mAP50'
     ],
 )
 
 print(
-    "Required AP50       :",
+    'Required AP50     :',
     source_required_map50,
 )
 
 print(
-    "Initial Precision   :",
+    'Initial Precision :',
     source_initial_report[
-        "metrics"
+        'metrics'
     ][
-        "precision50"
+        'precision50'
     ],
 )
 
 print(
-    "Initial Recall      :",
+    'Initial Recall    :',
     source_initial_report[
-        "metrics"
+        'metrics'
     ][
-        "recall50"
+        'recall50'
     ],
 )
 
 print(
-    "Initial Geometry    :",
+    'Initial Geometry  :',
     source_initial_report[
-        "metrics"
+        'metrics'
     ][
-        "geometry_recall50"
+        'geometry_recall50'
     ],
 )
 
 print(
-    "Initial mean score  :",
-    source_initial_report[
-        "metrics"
-    ][
-        "mean_max_score"
-    ],
-)
-
-print(
-    "Total updates       :",
+    'Total updates     :',
     source_total_updates,
 )
 
-print("=" * 70)
+print('=' * 70)
 
 
 # ==========================================================
-# FULL TRAINING
+# Full training
 # ==========================================================
 
 for epoch in range(
     1,
     TRAIN_CONFIG[
-        "stage1"
+        'stage1'
     ][
-        "epochs"
+        'epochs'
     ]
     +
     1,
 ):
 
-    # ------------------------------------------------------
-    # NEW TRAIN EPISODES FOR THIS EPOCH
-    # ------------------------------------------------------
-
     train_dataset.set_epoch(
         epoch
     )
 
+    train_stats = (
+        train_detection_epoch(
 
-    train_stats = train_detection_epoch(
+            target_model=
+                source_model,
 
-        target_model=
+            loader=
+                train_loader,
+
+            optimizer=
+                source_optimizer,
+
+            max_steps=
+                TRAIN_CONFIG[
+                    'stage1'
+                ][
+                    'steps_per_epoch'
+                ],
+
+            stage=
+                'stage1',
+
+            description=(
+                f'COCO80 '
+                f'{epoch}/'
+                f"{TRAIN_CONFIG['stage1']['epochs']}"
+            ),
+
+            show_progress=True,
+
+            scheduler=
+                source_scheduler,
+        )
+    )
+
+    # Fixed unseen validation.
+    val_dataset.set_epoch(
+        0
+    )
+
+    val_report = (
+        evaluate_episodic_model(
             source_model,
-
-        loader=
-            train_loader,
-
-        optimizer=
-            source_optimizer,
-
-        max_steps=(
-            TRAIN_CONFIG[
-                "stage1"
-            ][
-                "steps_per_epoch"
-            ]
-        ),
-
-        stage=
-            "stage1",
-
-        description=(
-            f"COCO80 {epoch}/"
-            f"{TRAIN_CONFIG['stage1']['epochs']}"
-        ),
-
-        show_progress=
-            True,
-
-        scheduler=
-            source_scheduler,
+            val_loader,
+            show_progress=True,
+        )
     )
-
-
-    # ------------------------------------------------------
-    # FIX VALIDATION EPISODES
-    # ------------------------------------------------------
-
-    val_dataset.set_epoch(0)
-
-
-    val_report = evaluate_episodic_model(
-        source_model,
-        val_loader,
-        show_progress=True,
-    )
-
 
     if (
         val_report[
-            "metrics"
+            'metrics'
         ][
-            "classes_evaluated"
+            'classes_evaluated'
         ]
         !=
         80
     ):
         raise RuntimeError(
-            "Full validation does not cover all 80 classes."
+            'Full validation does not cover '
+            'all 80 classes.'
         )
-
-
-    # ------------------------------------------------------
-    # CURRENT LR
-    # ------------------------------------------------------
 
     current_lrs = {
 
         group.get(
-            "name",
-            str(index)
+            'name',
+            str(
+                index
+            ),
         ):
-            group["lr"]
+            group[
+                'lr'
+            ]
 
         for index, group
         in enumerate(
-            source_optimizer.param_groups
+            source_optimizer
+            .param_groups
         )
     }
 
-
-    # ------------------------------------------------------
-    # HISTORY
-    # ------------------------------------------------------
-
     source_history.append(
         {
-            "epoch":
+            'epoch':
                 epoch,
 
-            "train":
+            'train':
                 copy.deepcopy(
                     train_stats
                 ),
 
-            "val":
+            'val':
                 copy.deepcopy(
                     val_report
                 ),
 
-            "learning_rates":
-                copy.deepcopy(
-                    current_lrs
-                ),
+            'learning_rates':
+                current_lrs,
         }
     )
 
-
-    # ======================================================
-    # BEST CHECKPOINT RANK
-    #
-    # AP50 is primary.
-    #
-    # Geometry precedes fixed-threshold P/R as a source-stage
-    # tie-breaker because P/R may still be score-calibration
-    # limited at confidence 0.50.
-    # ======================================================
-
+    # AP50 = primary.
+    # Geometry first tie-breaker.
+    # P/R fixed threshold later tie-breakers only.
     current_rank = (
 
         val_report[
-            "metrics"
+            'metrics'
         ][
-            "mAP50"
+            'mAP50'
         ],
 
         val_report[
-            "metrics"
+            'metrics'
         ][
-            "geometry_recall50"
+            'geometry_recall50'
         ],
 
         val_report[
-            "metrics"
+            'metrics'
         ][
-            "precision50"
+            'precision50'
         ],
 
         val_report[
-            "metrics"
+            'metrics'
         ][
-            "recall50"
+            'recall50'
         ],
 
         -val_report[
-            "mean_loss"
+            'mean_loss'
         ][
-            "loss_total"
+            'loss_total'
         ],
     )
-
 
     best_rank = (
 
         source_best_report[
-            "metrics"
+            'metrics'
         ][
-            "mAP50"
+            'mAP50'
         ],
 
         source_best_report[
-            "metrics"
+            'metrics'
         ][
-            "geometry_recall50"
+            'geometry_recall50'
         ],
 
         source_best_report[
-            "metrics"
+            'metrics'
         ][
-            "precision50"
+            'precision50'
         ],
 
         source_best_report[
-            "metrics"
+            'metrics'
         ][
-            "recall50"
+            'recall50'
         ],
 
         -source_best_report[
-            "mean_loss"
+            'mean_loss'
         ][
-            "loss_total"
+            'loss_total'
         ],
     )
-
 
     improved = bool(
         current_rank
         >
         best_rank
     )
-
 
     if improved:
 
@@ -563,7 +512,6 @@ for epoch in range(
             epoch
         )
 
-
         save_source_checkpoint(
             COCO80_BEST_CHECKPOINT_PATH,
             epoch,
@@ -573,11 +521,7 @@ for epoch in range(
             val_report,
         )
 
-
-    # ------------------------------------------------------
-    # ALWAYS SAVE LATEST
-    # ------------------------------------------------------
-
+    # Always save latest.
     save_source_checkpoint(
         COCO80_LATEST_CHECKPOINT_PATH,
         epoch,
@@ -587,133 +531,104 @@ for epoch in range(
         val_report,
     )
 
-
-    # ======================================================
-    # EPOCH REPORT
-    # ======================================================
-
     print(
-
-        f"Epoch {epoch:02d}",
-
-        "| train",
+        f'Epoch {epoch:02d}',
+        '| train',
         round(
             train_stats[
-                "loss_total"
+                'loss_total'
             ],
             4,
         ),
-
-        "| val",
+        '| val',
         round(
             val_report[
-                "mean_loss"
+                'mean_loss'
             ][
-                "loss_total"
+                'loss_total'
             ],
             4,
         ),
-
-        "| AP50",
+        '| AP50',
         round(
             val_report[
-                "metrics"
+                'metrics'
             ][
-                "mAP50"
+                'mAP50'
             ],
             4,
         ),
-
-        "| P",
+        '| P',
         round(
             val_report[
-                "metrics"
+                'metrics'
             ][
-                "precision50"
+                'precision50'
             ],
             4,
         ),
-
-        "| R",
+        '| R',
         round(
             val_report[
-                "metrics"
+                'metrics'
             ][
-                "recall50"
+                'recall50'
             ],
             4,
         ),
-
-        "| geo",
+        '| geo',
         round(
             val_report[
-                "metrics"
+                'metrics'
             ][
-                "geometry_recall50"
+                'geometry_recall50'
             ],
             4,
         ),
-
-        "| AP75",
+        '| AP75',
         round(
             val_report[
-                "metrics"
+                'metrics'
             ][
-                "mAP75"
+                'mAP75'
             ],
             4,
         ),
-
-        "| maxscore",
-        round(
-            val_report[
-                "metrics"
-            ][
-                "mean_max_score"
-            ],
-            4,
-        ),
-
-        "| lr",
+        '| lr',
         f"{current_lrs.get('main', float('nan')):.2e}",
-
-        "| BEST"
+        '| BEST'
         if improved
-        else "",
+        else
+        '',
     )
 
 
 # ==========================================================
-# FINAL FULL-RUN VALIDATION
+# Final source stability gate
 # ==========================================================
 
 if source_best_epoch <= 0:
 
     raise RuntimeError(
-        "Full COCO-80 training did not improve "
-        "over initialization."
+        'Full COCO-80 training did not improve '
+        'over initialization.'
     )
 
 
 if not os.path.isfile(
     COCO80_BEST_CHECKPOINT_PATH
 ):
-
     raise RuntimeError(
-        "Best COCO-80 checkpoint was not created."
+        'Best COCO-80 checkpoint was not created.'
     )
 
-
-# ==========================================================
-# STABILITY WINDOW
-# ==========================================================
 
 window = min(
 
     TRAIN_CONFIG[
-        "short"
+        'short'
     ][
-        "stability_window"
+        'stability_window'
     ],
 
     len(
@@ -723,9 +638,8 @@ window = min(
 
 
 if window < 1:
-
     raise RuntimeError(
-        "No full-training history was created."
+        'No full-training history was created.'
     )
 
 
@@ -739,11 +653,11 @@ last_window = (
 full_tail_map50 = np.asarray(
     [
         item[
-            "val"
+            'val'
         ][
-            "metrics"
+            'metrics'
         ][
-            "mAP50"
+            'mAP50'
         ]
 
         for item
@@ -752,100 +666,15 @@ full_tail_map50 = np.asarray(
     dtype=np.float64,
 )
 
-
-full_tail_precision = np.asarray(
-    [
-        item[
-            "val"
-        ][
-            "metrics"
-        ][
-            "precision50"
-        ]
-
-        for item
-        in last_window
-    ],
-    dtype=np.float64,
-)
-
-
-full_tail_recall = np.asarray(
-    [
-        item[
-            "val"
-        ][
-            "metrics"
-        ][
-            "recall50"
-        ]
-
-        for item
-        in last_window
-    ],
-    dtype=np.float64,
-)
-
-
-full_tail_geometry = np.asarray(
-    [
-        item[
-            "val"
-        ][
-            "metrics"
-        ][
-            "geometry_recall50"
-        ]
-
-        for item
-        in last_window
-    ],
-    dtype=np.float64,
-)
-
-
-full_tail_score = np.asarray(
-    [
-        item[
-            "val"
-        ][
-            "metrics"
-        ][
-            "mean_max_score"
-        ]
-
-        for item
-        in last_window
-    ],
-    dtype=np.float64,
-)
-
-
-# ==========================================================
-# BEST METRICS
-# ==========================================================
 
 source_best_map50 = (
     source_best_report[
-        "metrics"
+        'metrics'
     ][
-        "mAP50"
+        'mAP50'
     ]
 )
 
-
-source_best_geometry50 = (
-    source_best_report[
-        "metrics"
-    ][
-        "geometry_recall50"
-    ]
-)
-
-
-# ==========================================================
-# STABILITY
-# ==========================================================
 
 source_stable_tail = bool(
 
@@ -856,9 +685,9 @@ source_stable_tail = bool(
     >=
 
     TRAIN_CONFIG[
-        "short"
+        'short'
     ][
-        "stability_fraction"
+        'stability_fraction'
     ]
 
     *
@@ -870,36 +699,13 @@ source_stable_tail = bool(
 )
 
 
-# ==========================================================
-# GEOMETRY DIAGNOSTIC
-# ==========================================================
-
-source_geometry_improved = bool(
-
-    source_best_geometry50
-
-    >
-
-    source_initial_report[
-        "metrics"
-    ][
-        "geometry_recall50"
-    ]
-)
-
-
-# ==========================================================
-# FIXED-THRESHOLD P/R DIAGNOSTIC
-#
-# NOT a hard Stage-1 gate.
-# ==========================================================
-
+# Diagnostic only.
 source_pr_alive = bool(
 
     source_best_report[
-        "metrics"
+        'metrics'
     ][
-        "precision50"
+        'precision50'
     ]
     >
     0.0
@@ -907,29 +713,24 @@ source_pr_alive = bool(
     and
 
     source_best_report[
-        "metrics"
+        'metrics'
     ][
-        "recall50"
+        'recall50'
     ]
     >
     0.0
 )
 
 
-# ==========================================================
-# FINAL SOURCE-STABILITY DECISION
-#
-# HARD requirements:
-#   - actual learned checkpoint
-#   - AP50 above required floor
-#   - stable end-of-training performance
-#
-# P/R and Geometry are reported diagnostics here.
-# ==========================================================
-
+# Hard gate:
+# 1. learned checkpoint
+# 2. AP50 floor
+# 3. stable tail
 COCO80_META_TRAINING_COMPLETE = bool(
 
-    source_best_epoch > 0
+    source_best_epoch
+    >
+    0
 
     and
 
@@ -943,178 +744,130 @@ COCO80_META_TRAINING_COMPLETE = bool(
 )
 
 
-# ==========================================================
-# FINAL REPORT
-# ==========================================================
-
-print("=" * 70)
-print("STEP 30 COMPLETE : COCO-80 META-TRAINING")
-print("=" * 70)
+print('=' * 70)
+print('STEP 30 COMPLETE : COCO-80 META-TRAINING')
+print('=' * 70)
 
 print(
-    "Initial AP50        :",
+    'Initial AP50     :',
     source_initial_map50,
 )
 
 print(
-    "Required AP50       :",
+    'Required AP50    :',
     source_required_map50,
 )
 
 print(
-    "Best epoch          :",
+    'Best epoch       :',
     source_best_epoch,
 )
 
 print(
-    "Best AP50           :",
-    source_best_map50,
-)
-
-print(
-    "Best Precision@.50  :",
+    'Best AP50        :',
     source_best_report[
-        "metrics"
+        'metrics'
     ][
-        "precision50"
+        'mAP50'
     ],
 )
 
 print(
-    "Best Recall@.50     :",
+    'Best Precision   :',
     source_best_report[
-        "metrics"
+        'metrics'
     ][
-        "recall50"
+        'precision50'
     ],
 )
 
 print(
-    "Best Geometry50     :",
-    source_best_geometry50,
-)
-
-print(
-    "Best mean max score :",
+    'Best Recall      :',
     source_best_report[
-        "metrics"
+        'metrics'
     ][
-        "mean_max_score"
+        'recall50'
     ],
 )
 
 print(
-    "Diagnostic AP75     :",
+    'Best Geometry50  :',
     source_best_report[
-        "metrics"
+        'metrics'
     ][
-        "mAP75"
+        'geometry_recall50'
     ],
 )
 
 print(
-    "Diagnostic mAP50:95 :",
+    'Diagnostic AP75  :',
     source_best_report[
-        "metrics"
+        'metrics'
     ][
-        "mAP50_95"
+        'mAP75'
     ],
 )
 
-print("-" * 70)
+print(
+    'Diagnostic 50:95 :',
+    source_best_report[
+        'metrics'
+    ][
+        'mAP50_95'
+    ],
+)
 
 print(
-    "Tail AP50           :",
+    'Tail AP50        :',
     full_tail_map50.tolist(),
 )
 
 print(
-    "Tail mean AP50      :",
+    'Tail mean AP50   :',
     float(
         full_tail_map50.mean()
     ),
 )
 
 print(
-    "Tail Precision mean :",
-    float(
-        full_tail_precision.mean()
-    ),
-)
-
-print(
-    "Tail Recall mean    :",
-    float(
-        full_tail_recall.mean()
-    ),
-)
-
-print(
-    "Tail Geometry mean  :",
-    float(
-        full_tail_geometry.mean()
-    ),
-)
-
-print(
-    "Tail score mean     :",
-    float(
-        full_tail_score.mean()
-    ),
-)
-
-print("-" * 70)
-
-print(
-    "Stable >=80% best   :",
+    'Stable >=80% best:',
     source_stable_tail,
 )
 
 print(
-    "Geometry improved   :",
-    source_geometry_improved,
-    "(diagnostic)",
-)
-
-print(
-    "P/R @0.50 non-zero  :",
+    'P/R non-zero     :',
     source_pr_alive,
-    "(diagnostic)",
+    '(diagnostic only)',
 )
 
 print(
-    "SOURCE STABLE       :",
+    'SOURCE STABLE    :',
     COCO80_META_TRAINING_COMPLETE,
 )
 
 print(
-    "Best checkpoint     :",
+    'Best checkpoint  :',
     COCO80_BEST_CHECKPOINT_PATH,
 )
 
-print("=" * 70)
+print()
 
-
-# ==========================================================
-# CONTROLLED STOP
-# ==========================================================
 
 if not COCO80_META_TRAINING_COMPLETE:
 
     raise RuntimeError(
-        "Full COCO-80 run did not satisfy the "
-        "AP50/stability source gate. "
-        "Do NOT proceed to CCTV yet."
+        'Full COCO-80 run is still unstable. '
+        'Do NOT proceed to CCTV yet.'
     )
 
 
 print(
-    "NEXT: COCO-Val PERSON-only readiness gate."
+    'NEXT: COCO-Val PERSON-only readiness gate.'
 )
 
 print(
-    "COCO-person specialization is FALLBACK ONLY "
-    "if that gate fails."
+    'COCO-person specialization is FALLBACK ONLY '
+    'if that gate fails.'
 )
 
-print("=" * 70)
+print('=' * 70)
