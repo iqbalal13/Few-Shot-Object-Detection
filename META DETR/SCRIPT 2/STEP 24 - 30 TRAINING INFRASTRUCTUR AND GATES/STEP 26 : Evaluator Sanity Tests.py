@@ -1,13 +1,20 @@
 # ==========================================================
-# STEP 26 : Evaluator Sanity Tests
+# STEP 26 — FULL REPLACEMENT
+# Evaluator sanity tests
+# ==========================================================
+
+
+# ==========================================================
+# PERFECT CASE
 # ==========================================================
 
 perfect_records = [
 
     {
-        "semantic_label": 0,
+        'semantic_label':
+            0,
 
-        "scores":
+        'scores':
             np.array(
                 [
                     0.95,
@@ -15,7 +22,7 @@ perfect_records = [
                 ]
             ),
 
-        "pred_boxes":
+        'pred_boxes':
             np.array(
                 [
                     [
@@ -33,7 +40,7 @@ perfect_records = [
                 ]
             ),
 
-        "gt_boxes":
+        'gt_boxes':
             np.array(
                 [
                     [
@@ -47,9 +54,10 @@ perfect_records = [
     },
 
     {
-        "semantic_label": 1,
+        'semantic_label':
+            1,
 
-        "scores":
+        'scores':
             np.array(
                 [
                     0.90,
@@ -57,7 +65,7 @@ perfect_records = [
                 ]
             ),
 
-        "pred_boxes":
+        'pred_boxes':
             np.array(
                 [
                     [
@@ -75,7 +83,7 @@ perfect_records = [
                 ]
             ),
 
-        "gt_boxes":
+        'gt_boxes':
             np.array(
                 [
                     [
@@ -92,68 +100,57 @@ perfect_records = [
 
 perfect_metrics = (
     compute_episodic_metrics(
+
         perfect_records,
+
         score_threshold=0.50,
+        primary_iou_threshold=0.50,
     )
 )
 
 
 assert np.isclose(
     perfect_metrics[
-        "mAP50"
+        'precision50'
     ],
     1.0,
 )
+
 
 assert np.isclose(
     perfect_metrics[
-        "mAP75"
+        'recall50'
     ],
     1.0,
 )
+
 
 assert np.isclose(
     perfect_metrics[
-        "mAP95"
+        'geometry_recall50'
     ],
     1.0,
 )
 
-assert np.isclose(
-    perfect_metrics[
-        "precision50"
-    ],
-    1.0,
-)
 
-assert np.isclose(
-    perfect_metrics[
-        "recall50"
-    ],
-    1.0,
-)
-
-assert np.isclose(
-    perfect_metrics[
-        "geometry_recall50"
-    ],
-    1.0,
-)
-
+# ==========================================================
+# BAD LOCALIZATION
+# ==========================================================
 
 bad_records = [
 
     {
-        "semantic_label": 0,
+        'semantic_label':
+            0,
 
-        "scores":
+        'scores':
             np.array(
                 [
                     0.99
                 ]
             ),
 
-        "pred_boxes":
+        'pred_boxes':
             np.array(
                 [
                     [
@@ -165,7 +162,7 @@ bad_records = [
                 ]
             ),
 
-        "gt_boxes":
+        'gt_boxes':
             np.array(
                 [
                     [
@@ -182,49 +179,169 @@ bad_records = [
 
 bad_metrics = (
     compute_episodic_metrics(
+
         bad_records,
+
         score_threshold=0.50,
+        primary_iou_threshold=0.50,
     )
 )
 
 
 assert np.isclose(
     bad_metrics[
-        "mAP50"
+        'precision50'
     ],
     0.0,
 )
+
 
 assert np.isclose(
     bad_metrics[
-        "recall50"
+        'recall50'
     ],
     0.0,
 )
 
 
-print("=" * 70)
-print("STEP 26 PASS : EVALUATOR SANITY VALID")
-print("=" * 70)
-
-print(
-    "Perfect mAP50:",
-    perfect_metrics[
-        "mAP50"
-    ]
-)
-
-print(
-    "Bad mAP50    :",
+assert np.isclose(
     bad_metrics[
-        "mAP50"
-    ]
+        'geometry_recall50'
+    ],
+    0.0,
 )
 
-print("=" * 70)
+
+# ==========================================================
+# GOOD GEOMETRY, LOW CONFIDENCE
+#
+# Proves Geometry is independent from score threshold.
+# ==========================================================
+
+low_confidence_records = [
+
+    {
+        'semantic_label':
+            0,
+
+        'scores':
+            np.array(
+                [
+                    0.10
+                ]
+            ),
+
+        'pred_boxes':
+            np.array(
+                [
+                    [
+                        0.50,
+                        0.50,
+                        0.20,
+                        0.20,
+                    ]
+                ]
+            ),
+
+        'gt_boxes':
+            np.array(
+                [
+                    [
+                        0.50,
+                        0.50,
+                        0.20,
+                        0.20,
+                    ]
+                ]
+            ),
+    },
+]
+
+
+low_confidence_metrics = (
+    compute_episodic_metrics(
+
+        low_confidence_records,
+
+        score_threshold=0.50,
+        primary_iou_threshold=0.50,
+    )
+)
+
+
+assert np.isclose(
+    low_confidence_metrics[
+        'precision50'
+    ],
+    0.0,
+)
+
+
+assert np.isclose(
+    low_confidence_metrics[
+        'recall50'
+    ],
+    0.0,
+)
+
+
+assert np.isclose(
+    low_confidence_metrics[
+        'geometry_recall50'
+    ],
+    1.0,
+)
+
+
+print('=' * 70)
+print('STEP 26 PASS : EVALUATOR SANITY VALID')
+print('=' * 70)
+
+print(
+    'Perfect P/R/Geo :',
+    perfect_metrics[
+        'precision50'
+    ],
+    perfect_metrics[
+        'recall50'
+    ],
+    perfect_metrics[
+        'geometry_recall50'
+    ],
+)
+
+print(
+    'Bad P/R/Geo     :',
+    bad_metrics[
+        'precision50'
+    ],
+    bad_metrics[
+        'recall50'
+    ],
+    bad_metrics[
+        'geometry_recall50'
+    ],
+)
+
+print(
+    'LowConf P/R/Geo :',
+    low_confidence_metrics[
+        'precision50'
+    ],
+    low_confidence_metrics[
+        'recall50'
+    ],
+    low_confidence_metrics[
+        'geometry_recall50'
+    ],
+)
+
+print('=' * 70)
 
 
 del perfect_records
-del bad_records
 del perfect_metrics
+del bad_records
 del bad_metrics
+del low_confidence_records
+del low_confidence_metrics
