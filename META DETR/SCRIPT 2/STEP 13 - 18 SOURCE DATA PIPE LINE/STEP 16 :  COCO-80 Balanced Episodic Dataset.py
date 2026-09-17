@@ -1,22 +1,9 @@
 # ==========================================================
-# STEP 16 : COCO-80 Balanced Episodic Dataset
-#
-# 1-way / 1-shot episodic source meta-training.
-#
-# Example:
-# support = dog crop
-# query   = full image containing dog
-# GT      = every eligible dog in query
-#
-# Next episode may use car, person, bus, ...
-#
-# IMPORTANT:
-# detection labels remain binary-relative-to-support.
-# Semantic class is stored separately as episode_class.
+# STEP 16 — FULL REPLACEMENT
+# COCO-80 balanced episodic dataset + letterbox bbox mapping
 # ==========================================================
 
 from PIL import Image
-
 from torch.utils.data import Dataset
 
 
@@ -37,7 +24,6 @@ class COCOEpisodicDataset(Dataset):
     ):
 
         self.coco = coco
-
         self.image_dir = image_dir
 
         self.support_transform = (
@@ -52,7 +38,9 @@ class COCOEpisodicDataset(Dataset):
             num_episodes
         )
 
-        self.seed = int(seed)
+        self.seed = int(
+            seed
+        )
 
         self.min_bbox_size = float(
             min_bbox_size
@@ -63,7 +51,9 @@ class COCOEpisodicDataset(Dataset):
         )
 
         self.label_to_cat_id = {
-            label: cat_id
+            label:
+                cat_id
+
             for cat_id, label
             in self.cat_id_to_label.items()
         }
@@ -88,75 +78,97 @@ class COCOEpisodicDataset(Dataset):
 
         if not self.valid_labels:
             raise ValueError(
-                "allowed_labels menghasilkan "
-                "dataset kosong."
+                'allowed_labels menghasilkan dataset kosong.'
             )
 
         for label in self.valid_labels:
 
-            if label not in self.label_to_cat_id:
+            if (
+                label
+                not in
+                self.label_to_cat_id
+            ):
                 raise ValueError(
-                    f"Invalid internal label: {label}"
+                    f'Invalid internal label: {label}'
                 )
 
         self.epoch = 0
 
         # --------------------------------------------------
-        # Eligible annotation indexes
+        # Pre-build eligible object indexes
         # --------------------------------------------------
 
         self.valid_xyxy = {}
 
         self.class_to_ann_ids = {
             label: []
-            for label in self.valid_labels
+            for label
+            in self.valid_labels
         }
 
         self.class_to_image_ann_ids = {
             label: {}
-            for label in self.valid_labels
+            for label
+            in self.valid_labels
         }
 
         allowed_cat_ids = {
-            self.label_to_cat_id[label]
-            for label in self.valid_labels
+            self.label_to_cat_id[
+                label
+            ]
+            for label
+            in self.valid_labels
         }
 
-        for ann_id, ann in coco.anns.items():
+        for ann_id, ann in (
+            coco.anns.items()
+        ):
 
             cat_id = int(
                 ann.get(
-                    "category_id",
-                    -1
+                    'category_id',
+                    -1,
                 )
             )
 
-            if cat_id not in allowed_cat_ids:
-                continue
-
-            if ann.get(
-                "iscrowd",
-                0
+            if (
+                cat_id
+                not in
+                allowed_cat_ids
             ):
                 continue
 
-            if "bbox" not in ann:
+            if ann.get(
+                'iscrowd',
+                0,
+            ):
+                continue
+
+            if 'bbox' not in ann:
                 continue
 
             image_id = int(
-                ann["image_id"]
+                ann[
+                    'image_id'
+                ]
             )
 
             image_info = (
-                coco.imgs[image_id]
+                coco.imgs[
+                    image_id
+                ]
             )
 
             image_width = float(
-                image_info["width"]
+                image_info[
+                    'width'
+                ]
             )
 
             image_height = float(
-                image_info["height"]
+                image_info[
+                    'height'
+                ]
             )
 
             if (
@@ -168,35 +180,43 @@ class COCOEpisodicDataset(Dataset):
 
             x, y, w, h = map(
                 float,
-                ann["bbox"]
+                ann[
+                    'bbox'
+                ]
             )
 
             if not all(
-                math.isfinite(value)
-                for value in (
-                    x, y, w, h
+                math.isfinite(
+                    value
+                )
+                for value
+                in (
+                    x,
+                    y,
+                    w,
+                    h,
                 )
             ):
                 continue
 
             x1 = max(
                 0.0,
-                x
+                x,
             )
 
             y1 = max(
                 0.0,
-                y
+                y,
             )
 
             x2 = min(
                 image_width,
-                x + w
+                x + w,
             )
 
             y2 = min(
                 image_height,
-                y + h
+                y + h,
             )
 
             if (
@@ -242,7 +262,7 @@ class COCOEpisodicDataset(Dataset):
                 ]
                 .setdefault(
                     image_id,
-                    []
+                    [],
                 )
                 .append(
                     ann_id
@@ -250,11 +270,10 @@ class COCOEpisodicDataset(Dataset):
             )
 
         # --------------------------------------------------
-        # Sort indexes for reproducibility
+        # Sort / reproducibility
         # --------------------------------------------------
 
         self.class_to_img_ids = {}
-
         self.class_image_positions = {}
 
         for label in self.valid_labels:
@@ -274,7 +293,9 @@ class COCOEpisodicDataset(Dataset):
                     self
                     .class_to_image_ann_ids[
                         label
-                    ][image_id]
+                    ][
+                        image_id
+                    ]
                     .sort()
                 )
 
@@ -285,24 +306,27 @@ class COCOEpisodicDataset(Dataset):
                 ]
             )
 
-            if len(image_ids) < 2:
+            if len(
+                image_ids
+            ) < 2:
 
                 raise RuntimeError(
-                    "Category "
-                    f"{label} "
-                    "does not contain at least "
-                    "two eligible images."
+                    f'Category {label} does not contain '
+                    'at least two eligible images.'
                 )
 
             self.class_to_img_ids[
                 label
-            ] = image_ids
+            ] = (
+                image_ids
+            )
 
             self.class_image_positions[
                 label
             ] = {
 
-                image_id: index
+                image_id:
+                    index
 
                 for index, image_id
                 in enumerate(
@@ -310,21 +334,17 @@ class COCOEpisodicDataset(Dataset):
                 )
             }
 
-        # Balanced class schedule.
         self._build_episode_labels()
 
-    def __len__(self):
-
-        return self.num_episodes
+    def __len__(
+        self
+    ):
+        return (
+            self.num_episodes
+        )
 
     # ======================================================
-    # BALANCED EPISODE SCHEDULE
-    #
-    # 8000 episodes / 80 classes
-    # -> 100 episodes per class per epoch.
-    #
-    # 800 validation episodes
-    # -> 10 per class.
+    # Balanced class schedule
     # ======================================================
 
     def _build_episode_labels(
@@ -386,7 +406,9 @@ class COCOEpisodicDataset(Dataset):
             *
             self.num_episodes
             +
-            int(index)
+            int(
+                index
+            )
         )
 
         return random.Random(
@@ -394,7 +416,7 @@ class COCOEpisodicDataset(Dataset):
         )
 
     # ======================================================
-    # IMAGE LOADING
+    # Image loader
     # ======================================================
 
     def _load_image(
@@ -412,11 +434,11 @@ class COCOEpisodicDataset(Dataset):
             ]
         )
 
-        image_path = (
-            os.path.join(
-                self.image_dir,
-                info["file_name"]
-            )
+        image_path = os.path.join(
+            self.image_dir,
+            info[
+                'file_name'
+            ],
         )
 
         with Image.open(
@@ -424,39 +446,45 @@ class COCOEpisodicDataset(Dataset):
         ) as source:
 
             image = source.convert(
-                "RGB"
+                'RGB'
             )
 
         expected_size = (
             int(
-                info["width"]
+                info[
+                    'width'
+                ]
             ),
             int(
-                info["height"]
+                info[
+                    'height'
+                ]
             ),
         )
 
-        if image.size != expected_size:
-
+        if (
+            image.size
+            !=
+            expected_size
+        ):
             raise RuntimeError(
-                "Image/annotation "
-                "dimensions differ for "
-                f"image_id={image_id}"
+                'Image/annotation dimensions differ '
+                f'for image_id={image_id}'
             )
 
         return (
             image,
-            info
+            info,
         )
 
     # ======================================================
-    # SUPPORT
+    # Support
     # ======================================================
 
     def _load_support(
         self,
         annotation_id,
-        semantic_label
+        semantic_label,
     ):
 
         annotation_id = int(
@@ -467,13 +495,15 @@ class COCOEpisodicDataset(Dataset):
             semantic_label
         )
 
-        ann = self.coco.anns[
-            annotation_id
-        ]
+        ann = (
+            self.coco.anns[
+                annotation_id
+            ]
+        )
 
         image_id = int(
             ann[
-                "image_id"
+                'image_id'
             ]
         )
 
@@ -487,7 +517,7 @@ class COCOEpisodicDataset(Dataset):
             x1,
             y1,
             x2,
-            y2
+            y2,
 
         ) = self.valid_xyxy[
             annotation_id
@@ -516,13 +546,16 @@ class COCOEpisodicDataset(Dataset):
             crop.height <= 0
         ):
             raise RuntimeError(
-                "Invalid support crop."
+                'Invalid support crop.'
             )
 
-        if self.support_transform is None:
+        if (
+            self.support_transform
+            is None
+        ):
             raise RuntimeError(
-                "Support transform is required "
-                "for fixed-size batching."
+                'Support transform is required '
+                'for fixed-size batching.'
             )
 
         transformed = (
@@ -533,54 +566,58 @@ class COCOEpisodicDataset(Dataset):
 
         if not isinstance(
             transformed,
-            dict
+            dict,
         ):
             raise TypeError(
-                "support_transform must return a dict "
-                "with image/padding_mask/meta."
+                'support_transform must return a dict '
+                'with image/padding_mask/meta.'
             )
 
-        support_image = transformed[
-            "image"
-        ]
+        support_image = (
+            transformed[
+                'image'
+            ]
+        )
 
-        support_padding_mask = transformed[
-            "padding_mask"
-        ]
+        support_padding_mask = (
+            transformed[
+                'padding_mask'
+            ]
+        )
 
         support_target = {
 
-            "image_id":
+            'image_id':
                 torch.tensor(
                     image_id,
-                    dtype=torch.long
+                    dtype=torch.long,
                 ),
 
-            "annotation_id":
+            'annotation_id':
                 torch.tensor(
                     annotation_id,
-                    dtype=torch.long
+                    dtype=torch.long,
                 ),
 
-            "semantic_label":
+            'semantic_label':
                 torch.tensor(
                     semantic_label,
-                    dtype=torch.long
+                    dtype=torch.long,
                 ),
 
-            "category_id":
+            'category_id':
                 torch.tensor(
                     int(
                         ann[
-                            "category_id"
+                            'category_id'
                         ]
                     ),
-                    dtype=torch.long
+                    dtype=torch.long,
                 ),
 
-            "letterbox_meta":
+            'letterbox_meta':
                 transformed[
-                    "meta"
+                    'meta'
                 ],
         }
 
@@ -591,13 +628,13 @@ class COCOEpisodicDataset(Dataset):
         )
 
     # ======================================================
-    # QUERY
+    # Query
     # ======================================================
 
     def _load_query(
         self,
         image_id,
-        semantic_label
+        semantic_label,
     ):
 
         image_id = int(
@@ -621,20 +658,23 @@ class COCOEpisodicDataset(Dataset):
             ]
             .get(
                 image_id,
-                []
+                [],
             )
         )
 
         if not ann_ids:
             raise RuntimeError(
-                "Query image unexpectedly "
-                "contains no target instances."
+                'Query image unexpectedly contains '
+                'no target instances.'
             )
 
-        if self.query_transform is None:
+        if (
+            self.query_transform
+            is None
+        ):
             raise RuntimeError(
-                "Query transform is required "
-                "for fixed-size batching."
+                'Query transform is required '
+                'for fixed-size batching.'
             )
 
         transformed = (
@@ -645,52 +685,58 @@ class COCOEpisodicDataset(Dataset):
 
         if not isinstance(
             transformed,
-            dict
+            dict,
         ):
             raise TypeError(
-                "query_transform must return a dict "
-                "with image/padding_mask/meta."
+                'query_transform must return a dict '
+                'with image/padding_mask/meta.'
             )
 
-        query_image = transformed[
-            "image"
-        ]
+        query_image = (
+            transformed[
+                'image'
+            ]
+        )
 
-        query_padding_mask = transformed[
-            "padding_mask"
-        ]
+        query_padding_mask = (
+            transformed[
+                'padding_mask'
+            ]
+        )
 
-        meta = transformed[
-            "meta"
-        ]
+        meta = (
+            transformed[
+                'meta'
+            ]
+        )
 
         canvas_size = float(
             meta[
-                "canvas_size"
+                'canvas_size'
             ]
         )
 
         scale_x = float(
             meta[
-                "scale_x"
+                'scale_x'
             ]
         )
 
         scale_y = float(
             meta[
-                "scale_y"
+                'scale_y'
             ]
         )
 
         pad_left = float(
             meta[
-                "pad_left"
+                'pad_left'
             ]
         )
 
         pad_top = float(
             meta[
-                "pad_top"
+                'pad_top'
             ]
         )
 
@@ -702,62 +748,78 @@ class COCOEpisodicDataset(Dataset):
                 x1,
                 y1,
                 x2,
-                y2
+                y2,
 
             ) = self.valid_xyxy[
                 ann_id
             ]
 
-            # Original xyxy -> letterboxed xyxy.
+            # original xyxy -> letterboxed xyxy
             x1_l = (
                 x1 * scale_x
-                + pad_left
+                +
+                pad_left
             )
 
             x2_l = (
                 x2 * scale_x
-                + pad_left
+                +
+                pad_left
             )
 
             y1_l = (
                 y1 * scale_y
-                + pad_top
+                +
+                pad_top
             )
 
             y2_l = (
                 y2 * scale_y
-                + pad_top
+                +
+                pad_top
             )
 
-            # Clamp only for numerical safety.
+            # numerical safety
             x1_l = min(
-                max(x1_l, 0.0),
-                canvas_size
+                max(
+                    x1_l,
+                    0.0,
+                ),
+                canvas_size,
             )
 
             x2_l = min(
-                max(x2_l, 0.0),
-                canvas_size
+                max(
+                    x2_l,
+                    0.0,
+                ),
+                canvas_size,
             )
 
             y1_l = min(
-                max(y1_l, 0.0),
-                canvas_size
+                max(
+                    y1_l,
+                    0.0,
+                ),
+                canvas_size,
             )
 
             y2_l = min(
-                max(y2_l, 0.0),
-                canvas_size
+                max(
+                    y2_l,
+                    0.0,
+                ),
+                canvas_size,
             )
 
             width_l = max(
                 x2_l - x1_l,
-                1e-6
+                1e-6,
             )
 
             height_l = max(
                 y2_l - y1_l,
-                1e-6
+                1e-6,
             )
 
             boxes.append(
@@ -767,7 +829,9 @@ class COCOEpisodicDataset(Dataset):
                     )
                     /
                     (
-                        2.0 * canvas_size
+                        2.0
+                        *
+                        canvas_size
                     ),
 
                     (
@@ -775,7 +839,9 @@ class COCOEpisodicDataset(Dataset):
                     )
                     /
                     (
-                        2.0 * canvas_size
+                        2.0
+                        *
+                        canvas_size
                     ),
 
                     width_l
@@ -790,17 +856,18 @@ class COCOEpisodicDataset(Dataset):
 
         boxes = torch.tensor(
             boxes,
-            dtype=torch.float32
+            dtype=torch.float32,
         ).reshape(
             -1,
-            4
+            4,
         )
 
-        # Binary episodic target:
-        # every GT is foreground relative to support.
+        # Foreground relative to the support category.
         labels = torch.zeros(
-            len(boxes),
-            dtype=torch.long
+            len(
+                boxes
+            ),
+            dtype=torch.long,
         )
 
         cat_id = int(
@@ -811,29 +878,32 @@ class COCOEpisodicDataset(Dataset):
 
         target = {
 
-            "boxes": boxes,
+            'boxes':
+                boxes,
 
-            "labels": labels,
+            'labels':
+                labels,
 
-            "image_id":
+            'image_id':
                 torch.tensor(
                     image_id,
-                    dtype=torch.long
+                    dtype=torch.long,
                 ),
 
-            "semantic_label":
+            'semantic_label':
                 torch.tensor(
                     semantic_label,
-                    dtype=torch.long
+                    dtype=torch.long,
                 ),
 
-            "category_id":
+            'category_id':
                 torch.tensor(
                     cat_id,
-                    dtype=torch.long
+                    dtype=torch.long,
                 ),
 
-            "letterbox_meta": meta,
+            'letterbox_meta':
+                meta,
         }
 
         return (
@@ -843,7 +913,7 @@ class COCOEpisodicDataset(Dataset):
         )
 
     # ======================================================
-    # EPISODE
+    # Episode
     # ======================================================
 
     def __getitem__(
@@ -857,9 +927,12 @@ class COCOEpisodicDataset(Dataset):
 
         if not (
             0
-            <= index
+            <=
+            index
             <
-            len(self)
+            len(
+                self
+            )
         ):
             raise IndexError(
                 index
@@ -875,10 +948,6 @@ class COCOEpisodicDataset(Dataset):
             ]
         )
 
-        # --------------------------------------------------
-        # Pick support instance.
-        # --------------------------------------------------
-
         support_ann_id = (
             rng.choice(
                 self.class_to_ann_ids[
@@ -891,14 +960,9 @@ class COCOEpisodicDataset(Dataset):
             self.coco.anns[
                 support_ann_id
             ][
-                "image_id"
+                'image_id'
             ]
         )
-
-        # --------------------------------------------------
-        # Pick query image from SAME semantic class
-        # but DIFFERENT image.
-        # --------------------------------------------------
 
         image_ids = (
             self.class_to_img_ids[
@@ -944,135 +1008,134 @@ class COCOEpisodicDataset(Dataset):
             query_image_id
         ):
             raise RuntimeError(
-                "Support/query leakage."
+                'Support/query leakage.'
             )
 
         (
             support_image,
             support_padding_mask,
             support_target,
+
         ) = self._load_support(
             support_ann_id,
-            semantic_label
+            semantic_label,
         )
 
         (
             query_image,
             query_padding_mask,
             query_target,
+
         ) = self._load_query(
             query_image_id,
-            semantic_label
+            semantic_label,
         )
 
         return {
 
-            "episode_class":
+            'episode_class':
                 torch.tensor(
                     semantic_label,
-                    dtype=torch.long
+                    dtype=torch.long,
                 ),
 
-            "support_image":
+            'support_image':
                 support_image,
 
-            "support_padding_mask":
+            'support_padding_mask':
                 support_padding_mask,
 
-            "support_target":
+            'support_target':
                 support_target,
 
-            "query_image":
+            'query_image':
                 query_image,
 
-            "query_padding_mask":
+            'query_padding_mask':
                 query_padding_mask,
 
-            "query_target":
+            'query_target':
                 query_target,
         }
 
 
 # ==========================================================
-# BUILD SOURCE TRAIN / VALIDATION DATASETS
+# Build datasets
 # ==========================================================
 
-train_dataset = (
-    COCOEpisodicDataset(
+train_dataset = COCOEpisodicDataset(
 
-        coco=coco_train,
+    coco=
+        coco_train,
 
-        image_dir=
-            TRAIN_IMAGE_DIR,
+    image_dir=
+        TRAIN_IMAGE_DIR,
 
-        support_transform=
-            support_transform,
+    support_transform=
+        support_transform,
 
-        query_transform=
-            query_transform,
+    query_transform=
+        query_transform,
 
-        num_episodes=
-            COCO_CONFIG[
-                "num_train_episodes"
-            ],
+    num_episodes=
+        COCO_CONFIG[
+            'num_train_episodes'
+        ],
 
-        seed=
-            COCO_CONFIG[
-                "seed"
-            ],
+    seed=
+        COCO_CONFIG[
+            'seed'
+        ],
 
-        cat_id_to_label=
-            CAT_ID_TO_LABEL,
+    cat_id_to_label=
+        CAT_ID_TO_LABEL,
 
-        category_names=
-            CATEGORY_NAMES,
+    category_names=
+        CATEGORY_NAMES,
 
-        min_bbox_size=
-            COCO_CONFIG[
-                "min_bbox_size"
-            ],
-    )
+    min_bbox_size=
+        COCO_CONFIG[
+            'min_bbox_size'
+        ],
 )
 
 
-val_dataset = (
-    COCOEpisodicDataset(
+val_dataset = COCOEpisodicDataset(
 
-        coco=coco_val,
+    coco=
+        coco_val,
 
-        image_dir=
-            VAL_IMAGE_DIR,
+    image_dir=
+        VAL_IMAGE_DIR,
 
-        support_transform=
-            support_transform,
+    support_transform=
+        support_transform,
 
-        query_transform=
-            query_transform,
+    query_transform=
+        query_transform,
 
-        num_episodes=
-            COCO_CONFIG[
-                "num_val_episodes"
-            ],
+    num_episodes=
+        COCO_CONFIG[
+            'num_val_episodes'
+        ],
 
-        # Different deterministic stream.
-        seed=
-            COCO_CONFIG[
-                "seed"
-            ]
-            +
-            100_000,
+    seed=
+        COCO_CONFIG[
+            'seed'
+        ]
+        +
+        100_000,
 
-        cat_id_to_label=
-            CAT_ID_TO_LABEL,
+    cat_id_to_label=
+        CAT_ID_TO_LABEL,
 
-        category_names=
-            CATEGORY_NAMES,
+    category_names=
+        CATEGORY_NAMES,
 
-        min_bbox_size=
-            COCO_CONFIG[
-                "min_bbox_size"
-            ],
-    )
+    min_bbox_size=
+        COCO_CONFIG[
+            'min_bbox_size'
+        ],
 )
 
 
@@ -1085,35 +1148,13 @@ val_dataset.set_epoch(
 )
 
 
-print("=" * 70)
-print("STEP 16 : COCO-80 EPISODIC DATASETS READY")
-print("=" * 70)
+print('=' * 70)
+print('STEP 16 : COCO-80 EPISODIC DATASETS READY')
+print('=' * 70)
 
-print(
-    "Train episodes :",
-    len(
-        train_dataset
-    )
-)
+print('Train episodes :', len(train_dataset))
+print('Val episodes   :', len(val_dataset))
+print('Source classes :', len(train_dataset.valid_labels))
+print('Person label   :', PERSON_LABEL)
 
-print(
-    "Val episodes   :",
-    len(
-        val_dataset
-    )
-)
-
-print(
-    "Source classes :",
-    len(
-        train_dataset
-        .valid_labels
-    )
-)
-
-print(
-    "Person label   :",
-    PERSON_LABEL
-)
-
-print("=" * 70)
+print('=' * 70)
