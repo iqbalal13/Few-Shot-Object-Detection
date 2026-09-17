@@ -1,5 +1,6 @@
 # ==========================================================
 # STEP 2 — FULL REPLACEMENT
+# LOCKED RESEARCH PROTOCOL
 # ==========================================================
 
 PROJECT_ROOT = '/content/MetaDETR_Simplified_Final'
@@ -9,12 +10,22 @@ COCO_DIR = os.path.join(DATASET_DIR, 'coco')
 CCTV_DIR = os.path.join(DATASET_DIR, 'cctv')
 
 CHECKPOINT_DIR = os.path.join(PROJECT_ROOT, 'checkpoints')
-COCO80_CHECKPOINT_DIR = os.path.join(CHECKPOINT_DIR, 'coco80_meta')
-PERSON_CHECKPOINT_DIR = os.path.join(CHECKPOINT_DIR, 'coco_person')
-CCTV_CHECKPOINT_DIR = os.path.join(CHECKPOINT_DIR, 'cctv_fewshot')
+COCO80_CHECKPOINT_DIR = os.path.join(
+    CHECKPOINT_DIR,
+    'coco80_meta',
+)
+PERSON_CHECKPOINT_DIR = os.path.join(
+    CHECKPOINT_DIR,
+    'coco_person',
+)
+CCTV_CHECKPOINT_DIR = os.path.join(
+    CHECKPOINT_DIR,
+    'cctv_fewshot',
+)
 
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'outputs')
 LOG_DIR = os.path.join(PROJECT_ROOT, 'logs')
+
 
 for path in (
     PROJECT_ROOT,
@@ -28,7 +39,10 @@ for path in (
     OUTPUT_DIR,
     LOG_DIR,
 ):
-    os.makedirs(path, exist_ok=True)
+    os.makedirs(
+        path,
+        exist_ok=True,
+    )
 
 
 RESEARCH_PROTOCOL = {
@@ -38,6 +52,10 @@ RESEARCH_PROTOCOL = {
 
     'model':
         'Simplified Meta-DETR-inspired',
+
+    # ======================================================
+    # STAGE 1
+    # ======================================================
 
     'stage_1':
         'COCO-80 multi-class episodic '
@@ -63,27 +81,40 @@ RESEARCH_PROTOCOL = {
         'support-match/objectness + bounding box; '
         'NOT 80-way classification',
 
-    # Source readiness gates
+    # ======================================================
+    # SOURCE GATES
+    #
+    # Geometry50 and validation loss are internal diagnostics.
+    # They are NOT final thesis metrics.
+    # ======================================================
+
     'source_gate_1':
-        'stable unseen COCO-Val 80-class '
-        'episodic generalization',
+        'COCO-Val 80-class episodic stability '
+        'using validation loss + internal Geometry50',
 
     'source_gate_2':
-        'COCO-Val person-only AP50/Precision/Recall gate',
+        'COCO-Val person-only Precision/Recall readiness '
+        '+ internal Geometry50',
 
-    # Fallback only
+    # ======================================================
+    # FALLBACK
+    # ======================================================
+
     'stage_2':
         'COCO-person specialization — FALLBACK ONLY',
 
     'stage_2_trigger':
         'run only if generic COCO-80 checkpoint passes '
-        'the generic gate but person-specific validation '
-        'is weak',
+        'the generic source gate but person-specific '
+        'readiness remains weak',
 
     'stage_2_semantic_class':
         'person',
 
+    # ======================================================
     # CCTV
+    # ======================================================
+
     'stage_3':
         'CCTV few-shot cross-domain adaptation',
 
@@ -128,11 +159,11 @@ RESEARCH_PROTOCOL = {
     'target_test':
         'final evaluation only',
 
-    # Locked final thesis metrics
-    'final_metrics': {
+    # ======================================================
+    # FINAL THESIS METRICS — LOCKED
+    # ======================================================
 
-        'AP50':
-            'IoU >= 0.50; primary accuracy metric',
+    'final_metrics': {
 
         'Precision':
             'score >= 0.50 and IoU >= 0.50',
@@ -145,8 +176,29 @@ RESEARCH_PROTOCOL = {
             'same GPU; support prototype cached',
     },
 
-    'removed_metric':
+    # ======================================================
+    # INTERNAL ONLY
+    # ======================================================
+
+    'internal_diagnostics': {
+
+        'Geometry50':
+            'fraction of GT boxes having at least one '
+            'predicted box with IoU >= 0.50; '
+            'confidence ignored',
+
+        'Validation_Loss':
+            'internal optimization/stability diagnostic',
+    },
+
+    'removed_final_metrics': [
+        'AP50',
+        'AP75',
+        'AP95',
+        'mAP50:95',
         'NCAcc',
+        'F1',
+    ],
 }
 
 
@@ -154,14 +206,62 @@ print('=' * 70)
 print('STEP 2 : LOCKED RESEARCH PROTOCOL READY')
 print('=' * 70)
 
-print('Model        :', RESEARCH_PROTOCOL['model'])
-print('Stage 1      :', RESEARCH_PROTOCOL['stage_1'])
-print('Source gate  :', RESEARCH_PROTOCOL['source_gate_2'])
-print('Stage 2      :', RESEARCH_PROTOCOL['stage_2'])
-print('Stage 3      :', RESEARCH_PROTOCOL['stage_3'])
-print('Target shots :', RESEARCH_PROTOCOL['target_shots'])
-print('Shot unit    :', RESEARCH_PROTOCOL['shot_definition'])
-print('Final metrics:', list(RESEARCH_PROTOCOL['final_metrics'].keys()))
-print('Project root :', PROJECT_ROOT)
+print(
+    'Model        :',
+    RESEARCH_PROTOCOL['model'],
+)
+
+print(
+    'Stage 1      :',
+    RESEARCH_PROTOCOL['stage_1'],
+)
+
+print(
+    'Source gate  :',
+    RESEARCH_PROTOCOL['source_gate_2'],
+)
+
+print(
+    'Stage 2      :',
+    RESEARCH_PROTOCOL['stage_2'],
+)
+
+print(
+    'Stage 3      :',
+    RESEARCH_PROTOCOL['stage_3'],
+)
+
+print(
+    'Target shots :',
+    RESEARCH_PROTOCOL['target_shots'],
+)
+
+print(
+    'Shot unit    :',
+    RESEARCH_PROTOCOL['shot_definition'],
+)
+
+print(
+    'Final metrics:',
+    list(
+        RESEARCH_PROTOCOL[
+            'final_metrics'
+        ].keys()
+    ),
+)
+
+print(
+    'Internal only:',
+    list(
+        RESEARCH_PROTOCOL[
+            'internal_diagnostics'
+        ].keys()
+    ),
+)
+
+print(
+    'Project root :',
+    PROJECT_ROOT,
+)
 
 print('=' * 70)
