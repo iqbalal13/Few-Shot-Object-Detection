@@ -1,26 +1,9 @@
 # ==========================================================
-# STEP 11 : Final Simplified Meta-DETR
-#
-# FINAL LOCKED ARCHITECTURE
-#
-# Support:
-# image -> shared backbone -> prototype
-#
-# Query:
-# image -> shared backbone
-#       -> query encoder
-#       -> 3-layer transformer encoder
-#       -> 6-layer transformer decoder
-#
-# Then:
-# decoder objects + prototype
-#       -> residual relation
-#       -> support-conditioned head
+# STEP 11 — FULL REPLACEMENT
+# Final Simplified Meta-DETR
 # ==========================================================
 
-class SimplifiedMetaDETR(
-    nn.Module
-):
+class SimplifiedMetaDETR(nn.Module):
 
     def __init__(
         self,
@@ -35,33 +18,15 @@ class SimplifiedMetaDETR(
         super().__init__()
 
         self.backbone = backbone
-
-        self.support_encoder = (
-            support_encoder
-        )
-
-        self.query_encoder = (
-            query_encoder
-        )
-
-        self.transformer_encoder = (
-            transformer_encoder
-        )
-
-        self.transformer_decoder = (
-            transformer_decoder
-        )
-
-        self.relation_module = (
-            relation_module
-        )
-
-        self.detection_head = (
-            detection_head
-        )
+        self.support_encoder = support_encoder
+        self.query_encoder = query_encoder
+        self.transformer_encoder = transformer_encoder
+        self.transformer_decoder = transformer_decoder
+        self.relation_module = relation_module
+        self.detection_head = detection_head
 
     # ======================================================
-    # SUPPORT BRANCH
+    # SUPPORT
     # ======================================================
 
     def encode_support(
@@ -87,16 +52,13 @@ class SimplifiedMetaDETR(
         return prototype
 
     # ======================================================
-    # QUERY BRANCH
-    #
-    # IMPORTANT:
-    # support does NOT enter this branch.
+    # QUERY
     # ======================================================
 
     def encode_query(
         self,
         query_image,
-        query_padding_mask=None
+        query_padding_mask=None,
     ):
 
         query_feature_map = (
@@ -116,7 +78,7 @@ class SimplifiedMetaDETR(
             query_feature_map,
 
             padding_mask=
-                query_padding_mask
+                query_padding_mask,
         )
 
         memory = (
@@ -138,17 +100,16 @@ class SimplifiedMetaDETR(
         )
 
         extras = {
-
-            "memory":
+            'memory':
                 memory,
 
-            "query_position":
+            'query_position':
                 query_pos,
 
-            "padding_mask":
+            'padding_mask':
                 mask_flat,
 
-            "spatial_shape":
+            'spatial_shape':
                 spatial_shape,
         }
 
@@ -158,45 +119,47 @@ class SimplifiedMetaDETR(
         )
 
     # ======================================================
-    # SUPPORT CONDITIONING + PREDICTION
+    # SUPPORT CONDITIONING
     # ======================================================
 
     def condition_and_predict(
         self,
         decoder_objects,
-        support_prototype
+        support_prototype,
     ):
 
-        B = decoder_objects.shape[0]
+        B = (
+            decoder_objects
+            .shape[0]
+        )
 
-        # A single support prototype may condition
-        # multiple query images if needed.
         if (
-            support_prototype.shape[0]
-            == 1
+            support_prototype.shape[0] == 1
             and
             B > 1
         ):
 
             support_prototype = (
-                support_prototype.expand(
+                support_prototype
+                .expand(
                     B,
-                    -1
+                    -1,
                 )
             )
 
         if (
             support_prototype.shape[0]
-            != B
+            !=
+            B
         ):
             raise ValueError(
-                "Support/query batch mismatch."
+                'Support/query batch mismatch.'
             )
 
         relation_features = (
             self.relation_module(
                 decoder_objects,
-                support_prototype
+                support_prototype,
             )
         )
 
@@ -206,32 +169,29 @@ class SimplifiedMetaDETR(
             support_similarity,
 
         ) = self.detection_head(
-
             relation_features,
-            support_prototype
+            support_prototype,
         )
 
         outputs = {
-
-            "pred_logits":
+            'pred_logits':
                 pred_logits,
 
-            "pred_boxes":
+            'pred_boxes':
                 pred_boxes,
         }
 
         extras = {
-
-            "decoder_objects":
+            'decoder_objects':
                 decoder_objects,
 
-            "support_prototype":
+            'support_prototype':
                 support_prototype,
 
-            "relation_features":
+            'relation_features':
                 relation_features,
 
-            "support_similarity":
+            'support_similarity':
                 support_similarity,
         }
 
@@ -265,11 +225,9 @@ class SimplifiedMetaDETR(
             query_extras,
 
         ) = self.encode_query(
-
             query_image,
-
             query_padding_mask=
-                query_padding_mask
+                query_padding_mask,
         )
 
         (
@@ -277,9 +235,8 @@ class SimplifiedMetaDETR(
             relation_extras,
 
         ) = self.condition_and_predict(
-
             decoder_objects,
-            support_prototype
+            support_prototype,
         )
 
         extras = {
@@ -306,6 +263,7 @@ class SimplifiedMetaDETR(
 
         outputs, _ = (
             self.forward_with_features(
+
                 support_image=
                     support_image,
 
@@ -324,12 +282,10 @@ class SimplifiedMetaDETR(
 
 
 # ==========================================================
-# BUILD FINAL MODEL
+# BUILD MODEL
 # ==========================================================
 
-backbone = (
-    SharedResNet101Backbone()
-)
+backbone = SharedResNet101Backbone()
 
 support_encoder = (
     SupportPrototypeEncoder()
@@ -380,7 +336,7 @@ model = SimplifiedMetaDETR(
         detection_head,
 
 ).to(
-    CONFIG["device"]
+    CONFIG['device']
 )
 
 
@@ -417,69 +373,49 @@ assert (
 )
 
 
-# ==========================================================
-# PARAMETER SUMMARY
-# ==========================================================
-
 total_params = sum(
     p.numel()
-    for p in model.parameters()
+    for p
+    in model.parameters()
 )
 
 trainable_params = sum(
     p.numel()
-    for p in model.parameters()
+    for p
+    in model.parameters()
     if p.requires_grad
 )
 
 
-print("=" * 70)
-print("STEP 11 : FINAL SIMPLIFIED META-DETR READY")
-print("=" * 70)
+print('=' * 70)
+print('STEP 11 : FINAL SIMPLIFIED META-DETR READY')
+print('=' * 70)
 
+print('Model          :', model.__class__.__name__)
 print(
-    "Model          :",
-    model.__class__.__name__
-)
-
-print(
-    "Encoder layers :",
+    'Encoder layers :',
     len(
         model
         .transformer_encoder
         .layers
     )
 )
-
 print(
-    "Decoder layers :",
+    'Decoder layers :',
     len(
         model
         .transformer_decoder
         .layers
     )
 )
-
 print(
-    "Object queries :",
+    'Object queries :',
     model
     .transformer_decoder
     .num_queries
 )
+print('Parameters     :', f'{total_params:,}')
+print('Trainable      :', f'{trainable_params:,}')
+print('Device         :', CONFIG['device'])
 
-print(
-    "Parameters     :",
-    f"{total_params:,}"
-)
-
-print(
-    "Trainable      :",
-    f"{trainable_params:,}"
-)
-
-print(
-    "Device         :",
-    CONFIG["device"]
-)
-
-print("=" * 70)
+print('=' * 70)
