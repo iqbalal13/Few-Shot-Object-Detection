@@ -1,13 +1,39 @@
 # ==========================================================
-# STEP 27 : Stage-1 Forward / Backward / Optimizer Smoke Test
-#
-# Verify:
-# - forward valid
-# - backward valid
-# - backbone receives gradient
-# - main model receives gradient
-# - optimizer updates parameters
-# - BN running statistics remain frozen
+# STEP 27 — FULL REPLACEMENT
+# Stage-1 Forward / Backward / Optimizer + Budget Smoke Test
+# ==========================================================
+
+
+# ==========================================================
+# BUDGET SANITY
+# ==========================================================
+
+assert (
+    optimizer_updates_for_episodes(
+        800,
+        4,
+    )
+    ==
+    200
+)
+
+
+assert (
+    STAGE1_UPDATES_PER_EPOCH
+    ==
+    200
+)
+
+
+assert (
+    STAGE1_TOTAL_UPDATES
+    ==
+    5000
+)
+
+
+# ==========================================================
+# MODEL / OPTIMIZER SMOKE TEST
 # ==========================================================
 
 smoke_model = (
@@ -20,7 +46,7 @@ smoke_optimizer, _ = (
 
         smoke_model,
 
-        stage="stage1",
+        stage='stage1',
 
         use_scheduler=False,
     )
@@ -38,10 +64,6 @@ prepare_model_for_training(
     smoke_model
 )
 
-
-# ==========================================================
-# SNAPSHOTS
-# ==========================================================
 
 backbone_parameter = next(
 
@@ -84,11 +106,14 @@ main_before = (
 
 
 first_bn = next(
+
     module
+
     for module
     in smoke_model
     .backbone
     .modules()
+
     if isinstance(
         module,
         nn.BatchNorm2d
@@ -103,10 +128,6 @@ bn_mean_before = (
     .clone()
 )
 
-
-# ==========================================================
-# ONE UPDATE
-# ==========================================================
 
 smoke_optimizer.zero_grad(
     set_to_none=True
@@ -124,26 +145,24 @@ smoke_losses = (
 
         device=
             CONFIG[
-                "device"
+                'device'
             ],
     )
 )
 
 
 smoke_losses[
-    "loss_total"
+    'loss_total'
 ].backward()
 
 
 backbone_gradient = sum(
 
-    (
-        parameter.grad
-        .detach()
-        .abs()
-        .sum()
-        .item()
-    )
+    parameter.grad
+    .detach()
+    .abs()
+    .sum()
+    .item()
 
     for parameter
     in smoke_model
@@ -161,13 +180,11 @@ backbone_gradient = sum(
 
 main_gradient = sum(
 
-    (
-        parameter.grad
-        .detach()
-        .abs()
-        .sum()
-        .item()
-    )
+    parameter.grad
+    .detach()
+    .abs()
+    .sum()
+    .item()
 
     for parameter
     in smoke_model
@@ -183,17 +200,8 @@ main_gradient = sum(
 )
 
 
-assert (
-    backbone_gradient
-    >
-    0.0
-)
-
-assert (
-    main_gradient
-    >
-    0.0
-)
+assert backbone_gradient > 0.0
+assert main_gradient > 0.0
 
 
 torch.nn.utils.clip_grad_norm_(
@@ -209,9 +217,9 @@ torch.nn.utils.clip_grad_norm_(
 
     max_norm=
         TRAIN_CONFIG[
-            "stage1"
+            'stage1'
         ][
-            "gradient_clip"
+            'gradient_clip'
         ],
 
     error_if_nonfinite=True,
@@ -223,50 +231,69 @@ smoke_optimizer.step()
 
 assert not torch.equal(
     backbone_before,
-    backbone_parameter.detach()
+    backbone_parameter.detach(),
 )
 
 
 assert not torch.equal(
     main_before,
-    main_parameter.detach()
+    main_parameter.detach(),
 )
 
 
 assert torch.equal(
     bn_mean_before,
-    first_bn.running_mean
+    first_bn.running_mean,
 )
 
 
-print("=" * 70)
-print("STEP 27 PASS : STAGE-1 OPTIMIZER SMOKE TEST")
-print("=" * 70)
+print('=' * 70)
+print('STEP 27 PASS : STAGE-1 SMOKE TEST')
+print('=' * 70)
 
 print(
-    "Loss:",
+    'Loss               :',
     float(
         smoke_losses[
-            "loss_total"
+            'loss_total'
         ].item()
-    )
+    ),
 )
 
 print(
-    "Backbone grad:",
-    backbone_gradient
+    'Backbone grad      :',
+    backbone_gradient,
 )
 
 print(
-    "Main grad    :",
-    main_gradient
+    'Main grad          :',
+    main_gradient,
 )
 
 print(
-    "BN stats     : FROZEN"
+    'BN stats           : FROZEN'
 )
 
-print("=" * 70)
+print(
+    'Episodes/epoch     :',
+    TRAIN_CONFIG[
+        'stage1'
+    ][
+        'episodes_per_epoch'
+    ],
+)
+
+print(
+    'Updates/epoch      :',
+    STAGE1_UPDATES_PER_EPOCH,
+)
+
+print(
+    'Full total updates :',
+    STAGE1_TOTAL_UPDATES,
+)
+
+print('=' * 70)
 
 
 smoke_model.cpu()
