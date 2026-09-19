@@ -1,8 +1,22 @@
 # ==========================================================
 # STEP 29 — FULL REPLACEMENT
 #
-# SHORT COCO-80 STABILITY / GENERALIZATION GATE
+# SHORT COCO-80 LEARNING / READINESS GATE
 #
+# PURPOSE:
+# ----------------------------------------------------------
+# This short run is NOT the final stability certificate.
+# Its purpose is to verify that the model:
+#
+#   1. learns on unseen COCO-Val80 episodes,
+#   2. improves localization geometry,
+#   3. retains that improvement near the end of the run.
+#
+# True long-horizon stability is checked in STEP 30.
+#
+#
+# TRAINING BUDGET:
+# ----------------------------------------------------------
 # 5 epochs
 # 800 episodes / epoch
 # accumulation = 4
@@ -10,24 +24,43 @@
 # 200 optimizer updates / epoch
 # 1,000 optimizer updates executed
 #
-# Scheduler horizon = FULL 5,000 updates.
+# Scheduler horizon = FULL Stage-1 = 5,000 updates.
 #
-# HARD:
-#   validation loss improves
-#   Geometry50 improves
-#   last-3 Geometry mean >= 80% best Geometry
 #
-# P/R = diagnostic here.
+# HARD GATE:
+# ----------------------------------------------------------
+#   1. validation loss improves
+#   2. Geometry50 improves
+#   3. last-window mean Geometry50 remains above initialization
+#
+#
+# DIAGNOSTIC ONLY:
+# ----------------------------------------------------------
+#   tail Geometry / best Geometry stability ratio
+#   old reference threshold = 0.80
+#   Precision@0.50
+#   Recall@0.50
+#
+# The 0.80 stability ratio is NOT a hard blocker here.
+#
 # ==========================================================
 
+
+# ==========================================================
+# REQUIRE TINY LEARNING PASS
+# ==========================================================
 
 if not TINY_GATE_PASSED:
 
     raise RuntimeError(
         'STEP 28 tiny learning gate failed. '
-        'Do not run source stability gate.'
+        'Do not run source readiness gate.'
     )
 
+
+# ==========================================================
+# CONFIGURATION
+# ==========================================================
 
 short_epochs = int(
     TRAIN_CONFIG[
@@ -65,6 +98,10 @@ stage1_accumulation = int(
 )
 
 
+# ==========================================================
+# SHORT/FULL CONSISTENCY
+# ==========================================================
+
 if (
     short_episodes_per_epoch
     !=
@@ -76,6 +113,10 @@ if (
         'the same episodes_per_epoch.'
     )
 
+
+# ==========================================================
+# UPDATE BUDGET
+# ==========================================================
 
 short_updates_per_epoch = (
     optimizer_updates_for_episodes(
@@ -95,12 +136,15 @@ short_run_updates = (
 
 
 full_stage1_total_updates = (
+
     TRAIN_CONFIG[
         'stage1'
     ][
         'epochs'
     ]
+
     *
+
     optimizer_updates_for_episodes(
 
         stage1_episodes_per_epoch,
@@ -110,13 +154,14 @@ full_stage1_total_updates = (
 )
 
 
+# Locked protocol sanity.
 assert short_updates_per_epoch == 200
 assert short_run_updates == 1000
 assert full_stage1_total_updates == 5000
 
 
 # ==========================================================
-# FIXED VALIDATION
+# FIXED VALIDATION EPISODES
 # ==========================================================
 
 val_dataset.set_epoch(
@@ -124,10 +169,24 @@ val_dataset.set_epoch(
 )
 
 
+# ==========================================================
+# FRESH MODEL
+#
+# Tiny-model weights are NOT reused.
+# ==========================================================
+
 short_model = (
     make_trial_model()
 )
 
+
+# ==========================================================
+# OPTIMIZER + FULL-HORIZON SCHEDULER
+#
+# Short run executes 1,000 updates,
+# but follows first 1,000 updates of the
+# full 5,000-update Stage-1 schedule.
+# ==========================================================
 
 short_optimizer, short_scheduler = (
     build_optimizer_and_scheduler(
@@ -143,6 +202,10 @@ short_optimizer, short_scheduler = (
     )
 )
 
+
+# ==========================================================
+# INITIAL UNSEEN COCO-VAL80 EVALUATION
+# ==========================================================
 
 short_initial_report = (
     evaluate_episodic_model(
@@ -172,7 +235,12 @@ if (
     )
 
 
+# ==========================================================
+# INITIAL VALUES
+# ==========================================================
+
 initial_loss = float(
+
     short_initial_report[
         'mean_loss'
     ][
@@ -182,6 +250,7 @@ initial_loss = float(
 
 
 initial_geometry = float(
+
     short_initial_report[
         'metrics'
     ][
@@ -190,65 +259,119 @@ initial_geometry = float(
 )
 
 
+initial_precision = float(
+
+    short_initial_report[
+        'metrics'
+    ][
+        'precision50'
+    ]
+)
+
+
+initial_recall = float(
+
+    short_initial_report[
+        'metrics'
+    ][
+        'recall50'
+    ]
+)
+
+
+# ==========================================================
+# INITIAL REPORT
+# ==========================================================
+
 print('=' * 70)
-print('STEP 29 : SHORT COCO-80 STABILITY GATE')
+
+print(
+    'STEP 29 : SHORT COCO-80 '
+    'LEARNING / READINESS GATE'
+)
+
 print('=' * 70)
+
 
 print(
     'Short epochs            :',
     short_epochs,
 )
 
+
 print(
     'Episodes / epoch        :',
     short_episodes_per_epoch,
 )
+
+
+print(
+    'Accumulation steps      :',
+    stage1_accumulation,
+)
+
 
 print(
     'Optimizer updates/epoch :',
     short_updates_per_epoch,
 )
 
+
 print(
     'Short updates executed  :',
     short_run_updates,
 )
 
+
 print(
-    'Scheduler horizon       :',
+    'Full scheduler horizon  :',
     full_stage1_total_updates,
 )
+
+
+print(
+    'Warmup updates          :',
+    TRAIN_CONFIG[
+        'stage1'
+    ][
+        'warmup_updates'
+    ],
+)
+
+
+print('-' * 70)
+
 
 print(
     'Initial loss            :',
     initial_loss,
 )
 
+
 print(
     'Initial Geometry50      :',
     initial_geometry,
 )
 
-print(
-    'Initial Precision       :',
-    short_initial_report[
-        'metrics'
-    ][
-        'precision50'
-    ],
-)
 
 print(
-    'Initial Recall          :',
-    short_initial_report[
-        'metrics'
-    ][
-        'recall50'
-    ],
+    'Initial Precision@.50   :',
+    initial_precision,
 )
+
+
+print(
+    'Initial Recall@.50      :',
+    initial_recall,
+)
+
 
 print('=' * 70)
 
+
+# ==========================================================
+# HISTORY
+# ==========================================================
 
 short_history = []
 
@@ -264,7 +387,7 @@ short_best_epoch = 0
 
 
 # ==========================================================
-# TRAIN
+# SHORT SOURCE TRAINING
 # ==========================================================
 
 for epoch in range(
@@ -272,10 +395,18 @@ for epoch in range(
     short_epochs + 1,
 ):
 
+    # ------------------------------------------------------
+    # Deterministic episodic schedule for this epoch.
+    # ------------------------------------------------------
+
     train_dataset.set_epoch(
         epoch
     )
 
+
+    # ------------------------------------------------------
+    # 800 EPISODES, not 800 optimizer updates.
+    # ------------------------------------------------------
 
     train_stats = (
         train_detection_epoch(
@@ -308,6 +439,10 @@ for epoch in range(
     )
 
 
+    # ======================================================
+    # FIXED UNSEEN VALIDATION
+    # ======================================================
+
     val_dataset.set_epoch(
         0
     )
@@ -336,9 +471,13 @@ for epoch in range(
     ):
 
         raise RuntimeError(
-            'Validation coverage changed.'
+            'Validation coverage changed unexpectedly.'
         )
 
+
+    # ======================================================
+    # CURRENT LEARNING RATES
+    # ======================================================
 
     current_lrs = {
 
@@ -362,11 +501,17 @@ for epoch in range(
     }
 
 
+    # ======================================================
+    # HISTORY
+    # ======================================================
+
     short_history.append(
         {
 
             'epoch':
-                epoch,
+                int(
+                    epoch
+                ),
 
             'train':
                 copy.deepcopy(
@@ -392,8 +537,18 @@ for epoch in range(
     )
 
 
-    # INTERNAL checkpoint selection:
-    # Geometry primary, lower val loss tie-break.
+    # ======================================================
+    # BEST CHECKPOINT DIAGNOSTIC
+    #
+    # INTERNAL ranking:
+    #
+    #   1. higher Geometry50
+    #   2. lower validation loss
+    #
+    # P/R are deliberately NOT used for generic
+    # source checkpoint selection.
+    # ======================================================
+
     current_rank = (
 
         val_report[
@@ -438,8 +593,14 @@ for epoch in range(
             )
         )
 
-        short_best_epoch = epoch
+        short_best_epoch = int(
+            epoch
+        )
 
+
+    # ======================================================
+    # EPOCH LOG
+    # ======================================================
 
     print(
 
@@ -533,7 +694,28 @@ if (
 
 
 # ==========================================================
+# HISTORY SANITY
+# ==========================================================
+
+if (
+    len(
+        short_history
+    )
+    !=
+    short_epochs
+):
+
+    raise RuntimeError(
+        'Unexpected short-history length: '
+        f'{len(short_history)} '
+        f'!= {short_epochs}.'
+    )
+
+
+# ==========================================================
 # LOSS IMPROVEMENT
+#
+# HARD GATE COMPONENT 1
 # ==========================================================
 
 best_observed_loss = min(
@@ -560,6 +742,8 @@ loss_improved = bool(
 
 # ==========================================================
 # GEOMETRY IMPROVEMENT
+#
+# HARD GATE COMPONENT 2
 # ==========================================================
 
 best_geometry = max(
@@ -585,7 +769,7 @@ geometry_improved = bool(
 
 
 # ==========================================================
-# TAIL GEOMETRY STABILITY
+# LAST-WINDOW STATISTICS
 # ==========================================================
 
 window = min(
@@ -605,7 +789,7 @@ window = min(
 if window < 1:
 
     raise RuntimeError(
-        'No short-training history.'
+        'No short-training history was created.'
     )
 
 
@@ -673,10 +857,88 @@ last_recall = np.asarray(
 )
 
 
+last_loss = np.asarray(
+    [
+
+        item[
+            'val'
+        ][
+            'mean_loss'
+        ][
+            'loss_total'
+        ]
+
+        for item
+        in last_window
+    ],
+
+    dtype=np.float64,
+)
+
+
+# ==========================================================
+# TAIL VALUES
+# ==========================================================
+
 last_geometry_mean = float(
     last_geometry.mean()
 )
 
+
+last_loss_mean = float(
+    last_loss.mean()
+)
+
+
+last_precision_mean = float(
+    last_precision.mean()
+)
+
+
+last_recall_mean = float(
+    last_recall.mean()
+)
+
+
+final_geometry = float(
+    short_history[
+        -1
+    ][
+        'val'
+    ][
+        'metrics'
+    ][
+        'geometry_recall50'
+    ]
+)
+
+
+# ==========================================================
+# RETAINED LEARNING
+#
+# HARD GATE COMPONENT 3
+#
+# The short run must finish with a LAST-WINDOW mean
+# still above the untrained initialization.
+#
+# This prevents a model from passing merely because of
+# one transient early Geometry peak.
+# ==========================================================
+
+tail_above_initial = bool(
+    last_geometry_mean
+    >
+    initial_geometry
+)
+
+
+# ==========================================================
+# STABILITY DIAGNOSTIC
+#
+# NOT A HARD GATE IN STEP 29.
+#
+# True long-horizon stability belongs to STEP 30.
+# ==========================================================
 
 geometry_stability_ratio = (
 
@@ -691,7 +953,7 @@ geometry_stability_ratio = (
 )
 
 
-geometry_stable = bool(
+geometry_stable_diagnostic = bool(
 
     geometry_stability_ratio
 
@@ -705,26 +967,85 @@ geometry_stable = bool(
 )
 
 
+# ==========================================================
+# DROP FROM PEAK
+#
+# Pure diagnostic information.
+# ==========================================================
+
+peak_to_final_drop_fraction = max(
+
+    0.0,
+
+    (
+        best_geometry
+        -
+        final_geometry
+    )
+
+    /
+
+    max(
+        best_geometry,
+        1e-12,
+    )
+)
+
+
+peak_to_tail_mean_drop_fraction = max(
+
+    0.0,
+
+    (
+        best_geometry
+        -
+        last_geometry_mean
+    )
+
+    /
+
+    max(
+        best_geometry,
+        1e-12,
+    )
+)
+
+
+# ==========================================================
+# PRECISION / RECALL DIAGNOSTIC
+#
+# Not a hard gate at generic COCO80 source stage.
+#
+# Fixed score threshold can remain zero while
+# localization already learns.
+# ==========================================================
+
 precision_recall_alive = bool(
 
-    float(
-        last_precision.mean()
-    )
+    last_precision_mean
     >
     0.0
 
     and
 
-    float(
-        last_recall.mean()
-    )
+    last_recall_mean
     >
     0.0
 )
 
 
 # ==========================================================
-# FINAL GATE
+# FINAL STEP-29 READINESS GATE
+#
+# HARD CONDITIONS:
+#
+#   1. model produced a better checkpoint
+#   2. validation loss improved
+#   3. Geometry50 improved
+#   4. tail mean Geometry remains above initialization
+#
+# NOTE:
+# 80% peak stability ratio is diagnostic only here.
 # ==========================================================
 
 COCO80_GENERALIZATION_GATE_PASSED = bool(
@@ -743,61 +1064,104 @@ COCO80_GENERALIZATION_GATE_PASSED = bool(
 
     and
 
-    geometry_stable
+    tail_above_initial
 )
 
 
-print('=' * 70)
-print('STEP 29 : SHORT COCO-80 GATE RESULT')
+# ==========================================================
+# FINAL REPORT
+# ==========================================================
+
 print('=' * 70)
 
 print(
-    'Initial loss          :',
+    'STEP 29 : SHORT COCO-80 '
+    'LEARNING / READINESS RESULT'
+)
+
+print('=' * 70)
+
+
+print(
+    'Initial loss              :',
     initial_loss,
 )
 
+
 print(
-    'Best observed loss    :',
+    'Best observed loss        :',
     best_observed_loss,
 )
 
+
 print(
-    'Loss improved         :',
+    'Loss improved             :',
     loss_improved,
 )
 
+
 print(
-    'Initial Geometry50    :',
+    'Tail mean loss            :',
+    last_loss_mean,
+)
+
+
+print('-' * 70)
+
+
+print(
+    'Initial Geometry50        :',
     initial_geometry,
 )
 
+
 print(
-    'Best Geometry50       :',
+    'Best Geometry50           :',
     best_geometry,
 )
 
+
 print(
-    'Geometry improved     :',
+    'Final Geometry50          :',
+    final_geometry,
+)
+
+
+print(
+    'Geometry improved         :',
     geometry_improved,
 )
 
+
 print(
-    'Last-window Geometry  :',
+    'Last-window Geometry      :',
     last_geometry.tolist(),
 )
 
+
 print(
-    'Tail Geometry mean    :',
+    'Tail Geometry mean        :',
     last_geometry_mean,
 )
 
+
 print(
-    'Geometry stability    :',
+    'Tail > initialization     :',
+    tail_above_initial,
+)
+
+
+print('-' * 70)
+
+
+print(
+    'Geometry stability ratio  :',
     geometry_stability_ratio,
 )
 
+
 print(
-    'Required stability    :',
+    'Reference ratio           :',
     TRAIN_CONFIG[
         'short'
     ][
@@ -805,40 +1169,125 @@ print(
     ],
 )
 
-print(
-    'P mean (diagnostic)   :',
-    float(
-        last_precision.mean()
-    ),
-)
 
 print(
-    'R mean (diagnostic)   :',
-    float(
-        last_recall.mean()
-    ),
+    'Stable >= reference       :',
+    geometry_stable_diagnostic,
+    '(diagnostic only)',
 )
 
+
 print(
-    'P/R alive diagnostic  :',
+    'Peak -> final drop        :',
+    f'{peak_to_final_drop_fraction * 100.0:.2f}%',
+)
+
+
+print(
+    'Peak -> tail-mean drop    :',
+    f'{peak_to_tail_mean_drop_fraction * 100.0:.2f}%',
+)
+
+
+print('-' * 70)
+
+
+print(
+    'Tail Precision mean       :',
+    last_precision_mean,
+)
+
+
+print(
+    'Tail Recall mean          :',
+    last_recall_mean,
+)
+
+
+print(
+    'P/R alive                 :',
     precision_recall_alive,
+    '(diagnostic only)',
 )
 
+
+print('-' * 70)
+
+
 print(
-    'GATE PASSED           :',
+    'Best epoch                :',
+    short_best_epoch,
+)
+
+
+print(
+    'Scheduler updates         :',
+    short_scheduler
+    .num_updates,
+)
+
+
+print(
+    'Scheduler horizon         :',
+    short_scheduler
+    .total_updates,
+)
+
+
+print(
+    'READINESS GATE PASSED     :',
     COCO80_GENERALIZATION_GATE_PASSED,
 )
+
 
 print('=' * 70)
 
 
+# ==========================================================
+# INTERPRETATION
+# ==========================================================
+
+if COCO80_GENERALIZATION_GATE_PASSED:
+
+    print(
+        'STEP 29 PASS: short-run learning is confirmed.'
+    )
+
+    print(
+        'Proceed to STEP 30 for full Stage-1 training '
+        'and long-horizon stability evaluation.'
+    )
+
+else:
+
+    print(
+        'STEP 29 FAIL: short-run learning/readiness '
+        'criteria were not satisfied.'
+    )
+
+    print(
+        'Do not start full Stage-1 training yet.'
+    )
+
+
+print('=' * 70)
+
+
+# ==========================================================
+# CLEANUP
+# ==========================================================
+
 short_model.cpu()
+
 
 del short_model
 del short_optimizer
 del short_scheduler
 
+
 gc.collect()
 
+
 if torch.cuda.is_available():
+
     torch.cuda.empty_cache()
