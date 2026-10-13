@@ -1,9 +1,15 @@
 # ============================================================
 # STEP 30 — FULL COCO-80 SOURCE TRAINING
-# Resume from completed-epoch checkpoint
-# Full COCO-Val every epoch
-# Best checkpoint by Geometry50
-# Early stopping
+# FINAL BF16 VERSION
+#
+# - Resume from LAST completed epoch checkpoint
+# - Ignore legacy FP16 GradScaler state
+# - BF16 model forward
+# - FP32 stable loss
+# - Gradient clipping
+# - Full COCO-Val every epoch
+# - Best by Geometry50
+# - Early stopping
 # ============================================================
 
 import os
@@ -14,18 +20,35 @@ from google.colab import drive
 
 
 print("=" * 70)
-print("STEP 30 — FULL COCO-80 SOURCE TRAINING")
+print("STEP 30 — FULL COCO-80 SOURCE TRAINING (BF16)")
 print("=" * 70)
 
 
 assert torch.cuda.is_available(), (
-    "CUDA GPU tidak aktif. "
-    "Gunakan GPU runtime sebelum Step 30."
+    "CUDA GPU tidak aktif."
+)
+
+assert torch.cuda.is_bf16_supported(), (
+    "Current GPU does not support BF16."
+)
+
+
+print(
+    "GPU            :",
+    torch.cuda.get_device_name(0)
+)
+
+print(
+    "Training dtype : BF16"
+)
+
+print(
+    "Loss dtype     : FP32"
 )
 
 
 # ------------------------------------------------------------
-# Persistent Google Drive
+# Persistent Google Drive storage
 # ------------------------------------------------------------
 
 drive.mount(
@@ -59,19 +82,14 @@ LAST_CHECKPOINT = os.path.join(
 
 
 # ------------------------------------------------------------
-# Training configuration
+# Configuration
 # ------------------------------------------------------------
 
-# Kita evaluasi source model sampai epoch 5 dulu.
 MAX_SOURCE_EPOCHS = 5
 
-
-# JANGAN ubah ke 5.
-# Checkpoint lama dibuat dengan scheduler T_max=25,
-# jadi kita pertahankan horizon scheduler ini agar resume
-# konsisten.
+# Keep original scheduler horizon because
+# epoch-2 checkpoint was trained with T_max=25.
 SCHEDULER_TMAX = 25
-
 
 EARLY_STOPPING_PATIENCE = 2
 
@@ -130,7 +148,39 @@ print(
 
 
 # ------------------------------------------------------------
-# Build architecture
+# Parameter health check
+# ------------------------------------------------------------
+
+def assert_model_finite(
+    model,
+    label="model"
+):
+
+    bad_parameters = []
+
+    for name, parameter \
+        in model.named_parameters():
+
+        if not torch.isfinite(
+            parameter
+        ).all():
+
+            bad_parameters.append(
+                name
+            )
+
+
+    if bad_parameters:
+
+        raise FloatingPointError(
+            f"{label} contains non-finite "
+            f"parameters: "
+            f"{bad_parameters[:10]}"
+        )
+
+
+# ------------------------------------------------------------
+# Build clean architecture
 # ------------------------------------------------------------
 
 model = build_fresh_source_model()
@@ -139,13 +189,6 @@ model = build_fresh_source_model()
 optimizer = \
     build_source_optimizer(
         model
-    )
-
-
-scaler = \
-    torch.amp.GradScaler(
-        "cuda",
-        enabled=True
     )
 
 
@@ -167,27 +210,6 @@ best_val_loss = float(
 history = []
 
 epochs_without_improvement = 0
-
-
-# ------------------------------------------------------------
-# Check model parameters are finite
-# ------------------------------------------------------------
-
-def assert_model_finite(
-    model
-):
-
-    for name, parameter \
-        in model.named_parameters():
-
-        if not torch.isfinite(
-            parameter
-        ).all():
-
-            raise FloatingPointError(
-                "Non-finite parameter "
-                f"detected: {name}"
-            )
 
 
 # ------------------------------------------------------------
@@ -217,9 +239,9 @@ if os.path.exists(
     )
 
 
-    # Ensure epoch-2 checkpoint itself is healthy
     assert_model_finite(
-        model
+        model,
+        label="Loaded checkpoint model"
     )
 
 
@@ -237,15 +259,16 @@ if os.path.exists(
     )
 
 
+    # IMPORTANT:
+    # DO NOT LOAD OLD FP16 GradScaler state.
     if (
         "scaler_state_dict"
         in checkpoint
     ):
 
-        scaler.load_state_dict(
-            checkpoint[
-                "scaler_state_dict"
-            ]
+        print(
+            "Legacy FP16 GradScaler state "
+            "found → intentionally ignored."
         )
 
 
@@ -288,6 +311,11 @@ if os.path.exists(
 
 
     print(
+        "Loaded completed epoch  :",
+        start_epoch
+    )
+
+    print(
         "Resume from epoch       :",
         start_epoch + 1
     )
@@ -313,13 +341,117 @@ if os.path.exists(
 else:
 
     print(
-        "\nStarting CLEAN COCO-80 "
+        "\nNo LAST checkpoint found."
+    )
+
+    print(
+        "Starting CLEAN COCO-80 "
         "source training."
     )
 
 
 # ------------------------------------------------------------
-# Check whether requested training already completed
+# BF16 CHECKPOINT FORWARD HEALTH TEST
+# ------------------------------------------------------------
+
+print(
+    "\nRunning checkpoint BF16 "
+    "forward health check..."
+)
+
+
+health_images, health_targets = next(
+    iter(train_loader)
+)
+
+
+health_images = health_images[
+    :1
+].to(
+    device,
+    non_blocking=True
+)
+
+
+with torch.no_grad():
+
+    model.eval()
+
+    with torch.amp.autocast(
+        device_type="cuda",
+        dtype=torch.bfloat16
+    ):
+
+        health_outputs = model(
+            health_images
+        )
+
+
+for name, tensor in \
+    health_outputs.items():
+
+    if not torch.isfinite(
+        tensor
+    ).all():
+
+        raise FloatingPointError(
+            "Loaded checkpoint failed "
+            f"BF16 forward health test: "
+            f"{name} contains NaN/Inf."
+        )
+
+
+health_encoded = \
+    build_batch_centernet_targets(
+        health_targets[:1],
+        device=device
+    )
+
+
+health_losses = criterion(
+    health_outputs,
+    health_encoded
+)
+
+
+if not torch.isfinite(
+    health_losses[
+        "loss_total"
+    ]
+):
+
+    raise FloatingPointError(
+        "Loaded checkpoint produces "
+        "non-finite loss in BF16 "
+        "health test."
+    )
+
+
+print(
+    "Checkpoint BF16 health check : PASSED"
+)
+
+print(
+    "Health loss                  :",
+    float(
+        health_losses[
+            "loss_total"
+        ].detach()
+    )
+)
+
+
+del health_images
+del health_outputs
+del health_encoded
+del health_losses
+
+
+torch.cuda.empty_cache()
+
+
+# ------------------------------------------------------------
+# Already completed?
 # ------------------------------------------------------------
 
 if (
@@ -328,13 +460,12 @@ if (
 ):
 
     print(
-        f"\nCheckpoint already "
-        f"completed epoch "
-        f"{start_epoch}."
+        f"\nCheckpoint already completed "
+        f"epoch {start_epoch}."
     )
 
     print(
-        "No additional training required."
+        "No additional source training required."
     )
 
 
@@ -372,7 +503,7 @@ else:
 
 
         # ----------------------------------------------------
-        # COCO-TRAIN
+        # TRAIN — FULL COCO-TRAIN
         # ----------------------------------------------------
 
         train_stats = \
@@ -380,22 +511,22 @@ else:
                 model,
                 train_loader,
                 optimizer,
-                scaler,
                 max_batches=None
             )
+
+
+        assert_model_finite(
+            model,
+            label=(
+                f"Model after "
+                f"epoch {epoch_number}"
+            )
+        )
 
 
         print(
             f"\nTraining epoch "
             f"{epoch_number} complete."
-        )
-
-        print(
-            "Skipped gradient batches :",
-            train_stats.get(
-                "skipped_batches",
-                0
-            )
         )
 
 
@@ -506,11 +637,8 @@ else:
                     "recall"
                 ],
 
-            "skipped_batches":
-                train_stats.get(
-                    "skipped_batches",
-                    0
-                )
+            "precision_mode":
+                "bfloat16"
         }
 
 
@@ -594,7 +722,10 @@ else:
                         train_stats,
 
                     "config":
-                        CONFIG
+                        CONFIG,
+
+                    "precision_mode":
+                        "bfloat16"
                 },
                 BEST_CHECKPOINT
             )
@@ -637,7 +768,7 @@ else:
 
 
         # ----------------------------------------------------
-        # Scheduler after completed epoch
+        # Scheduler
         # ----------------------------------------------------
 
         scheduler.step()
@@ -646,7 +777,7 @@ else:
         # ----------------------------------------------------
         # LAST CHECKPOINT
         #
-        # This is always a COMPLETED epoch.
+        # NO GradScaler state is saved anymore.
         # ----------------------------------------------------
 
         torch.save(
@@ -659,9 +790,6 @@ else:
 
                 "scheduler_state_dict":
                     scheduler.state_dict(),
-
-                "scaler_state_dict":
-                    scaler.state_dict(),
 
                 "epoch":
                     epoch_number,
@@ -679,7 +807,10 @@ else:
                     epochs_without_improvement,
 
                 "config":
-                    CONFIG
+                    CONFIG,
+
+                "precision_mode":
+                    "bfloat16"
             },
             LAST_CHECKPOINT
         )
@@ -714,9 +845,8 @@ else:
             )
 
             print(
-                "Geometry50 did not "
-                "improve for "
-                f"{EARLY_STOPPING_PATIENCE} "
+                "Geometry50 did not improve "
+                f"for {EARLY_STOPPING_PATIENCE} "
                 "consecutive epochs."
             )
 
@@ -733,7 +863,7 @@ print(
 )
 
 print(
-    "FULL COCO-80 TRAINING FINISHED"
+    "FULL COCO-80 SOURCE TRAINING FINISHED"
 )
 
 print(
@@ -753,6 +883,10 @@ print(
 print(
     "Last checkpoint :",
     LAST_CHECKPOINT
+)
+
+print(
+    "Precision mode  : BF16"
 )
 
 print(
