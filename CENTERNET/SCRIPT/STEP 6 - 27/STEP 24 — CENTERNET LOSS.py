@@ -1,9 +1,13 @@
 # ============================================================
-# STEP 24 — CENTERNET LOSS
+# STEP 24 — CENTERNET LOSS (NUMERICALLY STABLE FOR AMP)
 # ============================================================
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 print("=" * 70)
-print("STEP 24 — BUILD CENTERNET LOSS")
+print("STEP 24 — BUILD CENTERNET LOSS (AMP-SAFE)")
 print("=" * 70)
 
 CONFIG["hm_loss_weight"] = 1.0
@@ -15,66 +19,88 @@ def centernet_focal_loss(
     prediction_logits,
     target
 ):
+    """
+    Numerically stable CenterNet focal loss.
 
-    prediction = torch.sigmoid(
-        prediction_logits
-    )
+    Forward model boleh AMP/FP16,
+    tetapi seluruh perhitungan focal loss
+    dipaksa FP32.
+    """
 
-    prediction = torch.clamp(
-        prediction,
-        min=1e-4,
-        max=1 - 1e-4
-    )
+    device_type = prediction_logits.device.type
 
-    positive_mask = target.eq(
-        1.0
-    ).float()
+    with torch.amp.autocast(
+        device_type=device_type,
+        enabled=False
+    ):
 
-    negative_mask = target.lt(
-        1.0
-    ).float()
+        logits = prediction_logits.float()
+        target = target.float()
 
-    negative_weights = torch.pow(
-        1 - target,
-        4
-    )
-
-    positive_loss = (
-        torch.log(prediction)
-        * torch.pow(
-            1 - prediction,
-            2
+        probability = torch.sigmoid(
+            logits
         )
-        * positive_mask
-    )
 
-    negative_loss = (
-        torch.log(
-            1 - prediction
+        positive_mask = target.eq(
+            1.0
+        ).float()
+
+        negative_mask = target.lt(
+            1.0
+        ).float()
+
+        negative_weights = torch.pow(
+            1.0 - target,
+            4
         )
-        * torch.pow(
-            prediction,
-            2
+
+        # Stable:
+        # log(sigmoid(x))
+        positive_log_prob = F.logsigmoid(
+            logits
         )
-        * negative_weights
-        * negative_mask
-    )
 
-    num_positive = positive_mask.sum()
+        # Stable:
+        # log(1 - sigmoid(x))
+        # = log(sigmoid(-x))
+        negative_log_prob = F.logsigmoid(
+            -logits
+        )
 
-    positive_loss = positive_loss.sum()
-    negative_loss = negative_loss.sum()
+        positive_loss = (
+            positive_log_prob
+            * torch.pow(
+                1.0 - probability,
+                2
+            )
+            * positive_mask
+        )
 
-    if num_positive > 0:
+        negative_loss = (
+            negative_log_prob
+            * torch.pow(
+                probability,
+                2
+            )
+            * negative_weights
+            * negative_mask
+        )
 
-        loss = -(
-            positive_loss
-            + negative_loss
-        ) / num_positive
+        num_positive = positive_mask.sum()
 
-    else:
+        positive_loss = positive_loss.sum()
+        negative_loss = negative_loss.sum()
 
-        loss = -negative_loss
+        if num_positive.item() > 0:
+
+            loss = -(
+                positive_loss
+                + negative_loss
+            ) / num_positive
+
+        else:
+
+            loss = -negative_loss
 
     return loss
 
@@ -131,25 +157,43 @@ def masked_l1_loss(
     target,
     mask
 ):
+    """
+    Masked L1 loss in FP32.
+    """
 
-    mask = mask.unsqueeze(
-        -1
-    ).expand_as(
-        prediction
-    ).float()
+    device_type = prediction.device.type
 
-    loss = F.l1_loss(
-        prediction * mask,
-        target * mask,
-        reduction="sum"
-    )
+    with torch.amp.autocast(
+        device_type=device_type,
+        enabled=False
+    ):
 
-    denominator = (
-        mask.sum()
-        + 1e-4
-    )
+        prediction = prediction.float()
+        target = target.float()
 
-    return loss / denominator
+        mask = mask.unsqueeze(
+            -1
+        ).expand_as(
+            prediction
+        ).float()
+
+        loss = F.l1_loss(
+            prediction * mask,
+            target * mask,
+            reduction="sum"
+        )
+
+        denominator = (
+            mask.sum()
+            + 1e-4
+        )
+
+        loss = (
+            loss
+            / denominator
+        )
+
+    return loss
 
 
 def build_batch_centernet_targets(
@@ -269,21 +313,54 @@ class CenterNetLoss(nn.Module):
         )
 
         return {
-            "loss_total": total_loss,
-            "loss_heatmap": heatmap_loss,
-            "loss_wh": wh_loss,
-            "loss_offset": offset_loss
+            "loss_total":
+                total_loss,
+
+            "loss_heatmap":
+                heatmap_loss,
+
+            "loss_wh":
+                wh_loss,
+
+            "loss_offset":
+                offset_loss
         }
 
 
 criterion = CenterNetLoss(
-    hm_weight=CONFIG["hm_loss_weight"],
-    wh_weight=CONFIG["wh_loss_weight"],
-    offset_weight=CONFIG["offset_loss_weight"]
+    hm_weight=CONFIG[
+        "hm_loss_weight"
+    ],
+    wh_weight=CONFIG[
+        "wh_loss_weight"
+    ],
+    offset_weight=CONFIG[
+        "offset_loss_weight"
+    ]
 ).to(device)
 
-print("Heatmap loss weight :", CONFIG["hm_loss_weight"])
-print("WH loss weight      :", CONFIG["wh_loss_weight"])
-print("Offset loss weight  :", CONFIG["offset_loss_weight"])
+
+print(
+    "Heatmap loss weight :",
+    CONFIG["hm_loss_weight"]
+)
+
+print(
+    "WH loss weight      :",
+    CONFIG["wh_loss_weight"]
+)
+
+print(
+    "Offset loss weight  :",
+    CONFIG["offset_loss_weight"]
+)
+
+print(
+    "Loss math precision : FP32"
+)
+
+print(
+    "Model forward AMP   : still allowed"
+)
 
 print("\nSTEP 24 PASSED")
