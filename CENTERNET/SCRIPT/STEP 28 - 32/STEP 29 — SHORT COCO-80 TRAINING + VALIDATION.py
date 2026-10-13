@@ -1,6 +1,8 @@
 # ============================================================
 # STEP 29 — SHORT COCO-80 TRAINING + VALIDATION
-# AMP + stable FP32 loss + gradient clipping
+# BF16 model forward
+# FP32 stable loss from Step 24
+# Gradient clipping
 # ============================================================
 
 import os
@@ -11,8 +13,11 @@ import numpy as np
 from torchvision.ops import box_iou
 
 print("=" * 70)
-print("STEP 29 — SHORT COCO-80 TRAINING + VALIDATION")
+print("STEP 29 — SHORT COCO-80 TRAINING + VALIDATION (BF16)")
 print("=" * 70)
+
+assert torch.cuda.is_available()
+assert torch.cuda.is_bf16_supported()
 
 GRAD_CLIP_NORM = 10.0
 
@@ -40,6 +45,7 @@ def greedy_detection_counts(
     pred_labels = prediction[
         "labels"
     ].detach().cpu()
+
 
     gt_boxes = target[
         "boxes"
@@ -145,11 +151,13 @@ def greedy_detection_counts(
             == pred_labels[pred_index]
         )[0]
 
+
         available_indices = [
             int(idx)
             for idx in same_class_indices
             if int(idx) not in matched_gt
         ]
+
 
         if len(
             available_indices
@@ -163,6 +171,7 @@ def greedy_detection_counts(
             available_indices
         ]
 
+
         ious = box_iou(
             pred_boxes[
                 pred_index:
@@ -171,6 +180,7 @@ def greedy_detection_counts(
             candidate_boxes
         )[0]
 
+
         (
             best_value,
             best_local_index
@@ -178,6 +188,7 @@ def greedy_detection_counts(
             ious,
             dim=0
         )
+
 
         if (
             float(best_value)
@@ -207,12 +218,34 @@ def greedy_detection_counts(
         - true_positive
     )
 
+
     return {
         "tp": true_positive,
         "fp": false_positive,
         "fn": false_negative,
         "gt": len(gt_boxes)
     }
+
+
+# ============================================================
+# OUTPUT FINITE CHECK
+# ============================================================
+
+def assert_outputs_finite(
+    outputs,
+    context=""
+):
+
+    for name, tensor in outputs.items():
+
+        if not torch.isfinite(
+            tensor
+        ).all():
+
+            raise FloatingPointError(
+                f"Non-finite MODEL OUTPUT "
+                f"'{name}' {context}"
+            )
 
 
 # ============================================================
@@ -252,8 +285,7 @@ def evaluate_centernet(
 
             if (
                 max_batches is not None
-                and batch_index
-                >= max_batches
+                and batch_index >= max_batches
             ):
                 break
 
@@ -264,10 +296,23 @@ def evaluate_centernet(
             )
 
 
-            # Model forward stays AMP
+            if not torch.isfinite(
+                images
+            ).all():
+
+                raise FloatingPointError(
+                    f"Non-finite validation INPUT "
+                    f"at batch {batch_index + 1}."
+                )
+
+
+            # ------------------------------------------------
+            # BF16 forward
+            # ------------------------------------------------
+
             with torch.amp.autocast(
                 device_type="cuda",
-                dtype=torch.float16
+                dtype=torch.bfloat16
             ):
 
                 outputs = model(
@@ -275,7 +320,19 @@ def evaluate_centernet(
                 )
 
 
-            # Loss itself is FP32 inside Step 24
+            assert_outputs_finite(
+                outputs,
+                context=(
+                    f"during validation "
+                    f"batch {batch_index + 1}."
+                )
+            )
+
+
+            # ------------------------------------------------
+            # FP32 loss from Step 24
+            # ------------------------------------------------
+
             if compute_loss:
 
                 encoded_targets = \
@@ -293,6 +350,7 @@ def evaluate_centernet(
                     "loss_total"
                 ]
 
+
                 if not torch.isfinite(
                     loss_value
                 ):
@@ -300,10 +358,14 @@ def evaluate_centernet(
                     raise FloatingPointError(
                         f"Non-finite validation loss "
                         f"at batch {batch_index + 1}. "
-                        f"hm={float(losses['loss_heatmap'].detach()):.6f}, "
-                        f"wh={float(losses['loss_wh'].detach()):.6f}, "
-                        f"off={float(losses['loss_offset'].detach()):.6f}"
+                        f"hm="
+                        f"{float(losses['loss_heatmap'].detach()):.6f}, "
+                        f"wh="
+                        f"{float(losses['loss_wh'].detach()):.6f}, "
+                        f"off="
+                        f"{float(losses['loss_offset'].detach()):.6f}"
                     )
+
 
                 total_loss += float(
                     loss_value.detach()
@@ -312,10 +374,19 @@ def evaluate_centernet(
                 loss_batches += 1
 
 
-            # Decode with confidence ignored
-            # for Geometry50.
+            # ------------------------------------------------
+            # Decode in FP32
+            # ------------------------------------------------
+
+            decode_outputs = {
+                name: tensor.float()
+                for name, tensor
+                in outputs.items()
+            }
+
+
             predictions = decode_centernet(
-                outputs,
+                decode_outputs,
                 K=100,
                 score_threshold=0.0
             )
@@ -327,9 +398,8 @@ def evaluate_centernet(
             ):
 
                 # --------------------------------------------
-                # Primary Precision / Recall
-                # score >= 0.50
-                # IoU >= 0.50
+                # Primary:
+                # score >= 0.50 + IoU >= 0.50
                 # --------------------------------------------
 
                 primary = \
@@ -343,6 +413,7 @@ def evaluate_centernet(
                         class_filter=
                             class_filter
                     )
+
 
                 total_tp += primary[
                     "tp"
@@ -358,7 +429,7 @@ def evaluate_centernet(
 
 
                 # --------------------------------------------
-                # Geometry50
+                # Geometry50:
                 # confidence ignored
                 # --------------------------------------------
 
@@ -372,6 +443,7 @@ def evaluate_centernet(
                         class_filter=
                             class_filter
                     )
+
 
                 geometry_matches += \
                     geometry["tp"]
@@ -388,6 +460,7 @@ def evaluate_centernet(
         )
     )
 
+
     recall = (
         total_tp
         / max(
@@ -396,6 +469,7 @@ def evaluate_centernet(
         )
     )
 
+
     geometry50 = (
         geometry_matches
         / max(
@@ -403,6 +477,7 @@ def evaluate_centernet(
             1
         )
     )
+
 
     mean_loss = (
         total_loss
@@ -416,29 +491,14 @@ def evaluate_centernet(
 
 
     return {
-        "loss":
-            mean_loss,
-
-        "precision":
-            precision,
-
-        "recall":
-            recall,
-
-        "geometry50":
-            geometry50,
-
-        "tp":
-            total_tp,
-
-        "fp":
-            total_fp,
-
-        "fn":
-            total_fn,
-
-        "gt":
-            geometry_gt
+        "loss": mean_loss,
+        "precision": precision,
+        "recall": recall,
+        "geometry50": geometry50,
+        "tp": total_tp,
+        "fp": total_fp,
+        "fn": total_fn,
+        "gt": geometry_gt
     }
 
 
@@ -450,7 +510,6 @@ def train_centernet_epoch(
     model,
     loader,
     optimizer,
-    scaler,
     max_batches=None
 ):
 
@@ -460,13 +519,13 @@ def train_centernet_epoch(
         model
     )
 
+
     total_loss = 0.0
     total_hm = 0.0
     total_wh = 0.0
     total_offset = 0.0
 
-    successful_batches = 0
-    skipped_batches = 0
+    batches = 0
 
 
     for batch_index, (
@@ -477,8 +536,7 @@ def train_centernet_epoch(
 
         if (
             max_batches is not None
-            and batch_index
-            >= max_batches
+            and batch_index >= max_batches
         ):
             break
 
@@ -487,6 +545,16 @@ def train_centernet_epoch(
             device,
             non_blocking=True
         )
+
+
+        if not torch.isfinite(
+            images
+        ).all():
+
+            raise FloatingPointError(
+                f"Non-finite training INPUT "
+                f"at batch {batch_index + 1}."
+            )
 
 
         encoded_targets = \
@@ -502,12 +570,12 @@ def train_centernet_epoch(
 
 
         # ----------------------------------------------------
-        # Forward stays FP16 AMP
+        # BF16 model forward
         # ----------------------------------------------------
 
         with torch.amp.autocast(
             device_type="cuda",
-            dtype=torch.float16
+            dtype=torch.bfloat16
         ):
 
             outputs = model(
@@ -515,8 +583,17 @@ def train_centernet_epoch(
             )
 
 
+        assert_outputs_finite(
+            outputs,
+            context=(
+                f"during training "
+                f"batch {batch_index + 1}."
+            )
+        )
+
+
         # ----------------------------------------------------
-        # Step-24 criterion calculates losses in FP32
+        # Stable FP32 loss from Step 24
         # ----------------------------------------------------
 
         losses = criterion(
@@ -524,14 +601,11 @@ def train_centernet_epoch(
             encoded_targets
         )
 
+
         total = losses[
             "loss_total"
         ]
 
-
-        # ----------------------------------------------------
-        # Catch loss problem with component information
-        # ----------------------------------------------------
 
         if not torch.isfinite(
             total
@@ -540,28 +614,20 @@ def train_centernet_epoch(
             raise FloatingPointError(
                 f"Non-finite training loss "
                 f"at batch {batch_index + 1}. "
-                f"hm={float(losses['loss_heatmap'].detach()):.6f}, "
-                f"wh={float(losses['loss_wh'].detach()):.6f}, "
-                f"off={float(losses['loss_offset'].detach()):.6f}"
+                f"hm="
+                f"{float(losses['loss_heatmap'].detach()):.6f}, "
+                f"wh="
+                f"{float(losses['loss_wh'].detach()):.6f}, "
+                f"off="
+                f"{float(losses['loss_offset'].detach()):.6f}"
             )
 
 
         # ----------------------------------------------------
-        # Backward with GradScaler
+        # BF16: NO GradScaler
         # ----------------------------------------------------
 
-        scaler.scale(
-            total
-        ).backward()
-
-
-        # ----------------------------------------------------
-        # Unscale BEFORE clipping
-        # ----------------------------------------------------
-
-        scaler.unscale_(
-            optimizer
-        )
+        total.backward()
 
 
         grad_norm = \
@@ -572,37 +638,17 @@ def train_centernet_epoch(
             )
 
 
-        # ----------------------------------------------------
-        # Rare AMP overflow protection
-        # ----------------------------------------------------
-
         if not torch.isfinite(
             grad_norm
         ):
 
-            skipped_batches += 1
-
-            optimizer.zero_grad(
-                set_to_none=True
+            raise FloatingPointError(
+                f"Non-finite GRADIENT "
+                f"at batch {batch_index + 1}."
             )
 
-            scaler.update()
 
-            print(
-                f"  WARNING batch "
-                f"{batch_index + 1}: "
-                f"non-finite gradient; "
-                f"optimizer step skipped."
-            )
-
-            continue
-
-
-        scaler.step(
-            optimizer
-        )
-
-        scaler.update()
+        optimizer.step()
 
 
         total_loss += float(
@@ -627,7 +673,7 @@ def train_centernet_epoch(
             ].detach()
         )
 
-        successful_batches += 1
+        batches += 1
 
 
         if (
@@ -647,36 +693,28 @@ def train_centernet_epoch(
             )
 
 
-    if successful_batches == 0:
+    if batches == 0:
 
         raise RuntimeError(
-            "No successful optimizer "
-            "update in this epoch."
+            "No successful training batches."
         )
 
 
     return {
         "loss":
-            total_loss
-            / successful_batches,
+            total_loss / batches,
 
         "heatmap":
-            total_hm
-            / successful_batches,
+            total_hm / batches,
 
         "wh":
-            total_wh
-            / successful_batches,
+            total_wh / batches,
 
         "offset":
-            total_offset
-            / successful_batches,
+            total_offset / batches,
 
-        "successful_batches":
-            successful_batches,
-
-        "skipped_batches":
-            skipped_batches
+        "batches":
+            batches
     }
 
 
@@ -685,23 +723,20 @@ def train_centernet_epoch(
 # ============================================================
 
 SHORT_EPOCHS = 2
+
 SHORT_TRAIN_BATCHES = 300
+
 SHORT_VAL_BATCHES = 100
 
 
-# Fresh source model
+# Fresh model
 short_model = \
     build_fresh_source_model()
+
 
 short_optimizer = \
     build_source_optimizer(
         short_model
-    )
-
-short_scaler = \
-    torch.amp.GradScaler(
-        "cuda",
-        enabled=True
     )
 
 
@@ -713,20 +748,24 @@ print(
     "\nInitial short validation..."
 )
 
-initial_val = evaluate_centernet(
-    short_model,
-    val_loader,
-    max_batches=
-        SHORT_VAL_BATCHES,
-    score_threshold=
-        CONFIG[
-            "score_threshold"
-        ],
-    iou_threshold=
-        CONFIG[
-            "iou_threshold"
-        ]
-)
+
+initial_val = \
+    evaluate_centernet(
+        short_model,
+        val_loader,
+        max_batches=
+            SHORT_VAL_BATCHES,
+
+        score_threshold=
+            CONFIG[
+                "score_threshold"
+            ],
+
+        iou_threshold=
+            CONFIG[
+                "iou_threshold"
+            ]
+    )
 
 
 print(
@@ -782,7 +821,6 @@ for epoch in range(
             short_model,
             train_loader,
             short_optimizer,
-            short_scaler,
             max_batches=
                 SHORT_TRAIN_BATCHES
         )
@@ -794,10 +832,12 @@ for epoch in range(
             val_loader,
             max_batches=
                 SHORT_VAL_BATCHES,
+
             score_threshold=
                 CONFIG[
                     "score_threshold"
                 ],
+
             iou_threshold=
                 CONFIG[
                     "iou_threshold"
@@ -825,11 +865,6 @@ for epoch in range(
     print(
         f"offset    : "
         f"{train_stats['offset']:.4f}"
-    )
-
-    print(
-        f"skipped   : "
-        f"{train_stats['skipped_batches']}"
     )
 
 
@@ -868,6 +903,7 @@ for epoch in range(
                 "geometry50"
             ]
 
+
         torch.save(
             {
                 "model_state_dict":
@@ -877,10 +913,14 @@ for epoch in range(
                     epoch,
 
                 "val_stats":
-                    val_stats
+                    val_stats,
+
+                "precision_mode":
+                    "bfloat16"
             },
             SHORT_CHECKPOINT
         )
+
 
         print(
             "\nSHORT BEST CHECKPOINT SAVED"
@@ -911,8 +951,15 @@ print(
 )
 
 print(
-    "Gradient clip norm    :",
-    GRAD_CLIP_NORM
+    "Model forward          : BF16"
+)
+
+print(
+    "Loss                   : FP32"
+)
+
+print(
+    "GradScaler             : NOT USED"
 )
 
 print(
