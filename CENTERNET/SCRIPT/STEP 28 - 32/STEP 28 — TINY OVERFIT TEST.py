@@ -1,6 +1,7 @@
 # ============================================================
 # STEP 28 — TINY OVERFIT TEST
-# Fresh model + backbone BN stats frozen
+# BF16 VERSION
+# Fresh model + frozen backbone BN statistics
 # ============================================================
 
 import os
@@ -11,16 +12,17 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 
 print("=" * 70)
-print("STEP 28 — TINY OVERFIT TEST")
+print("STEP 28 — TINY OVERFIT TEST (BF16)")
 print("=" * 70)
 
+
 # ------------------------------------------------------------
-# GPU REQUIRED
+# GPU / BF16 CHECK
 # ------------------------------------------------------------
 
 assert torch.cuda.is_available(), (
     "CUDA GPU tidak aktif. "
-    "Ubah Colab Runtime ke GPU lalu Run All Step 1–27."
+    "Gunakan Colab GPU runtime."
 )
 
 device = torch.device("cuda")
@@ -28,10 +30,19 @@ device = torch.device("cuda")
 print("Device :", device)
 print("GPU    :", torch.cuda.get_device_name(0))
 
+BF16_SUPPORTED = torch.cuda.is_bf16_supported()
+
+print("BF16 supported :", BF16_SUPPORTED)
+
+assert BF16_SUPPORTED, (
+    "GPU ini tidak mendukung BF16. "
+    "A100 seharusnya mendukung BF16."
+)
+
 
 # ------------------------------------------------------------
 # Freeze ONLY backbone BatchNorm running statistics
-# Backbone convolution weights remain trainable.
+# ResNet convolution weights remain trainable
 # ------------------------------------------------------------
 
 def set_backbone_bn_eval(model):
@@ -46,7 +57,7 @@ def set_backbone_bn_eval(model):
 
 
 # ------------------------------------------------------------
-# Fresh model builder
+# Fresh source model builder
 # ------------------------------------------------------------
 
 def build_fresh_source_model():
@@ -60,22 +71,20 @@ def build_fresh_source_model():
 
 
 # ------------------------------------------------------------
-# Optimizer builder
+# Source optimizer builder
 # ------------------------------------------------------------
 
 def build_source_optimizer(model):
 
-    optimizer = torch.optim.AdamW(
+    return torch.optim.AdamW(
         model.parameters(),
         lr=CONFIG["learning_rate"],
         weight_decay=CONFIG["weight_decay"]
     )
 
-    return optimizer
-
 
 # ------------------------------------------------------------
-# Select 8 fixed COCO images containing annotations
+# Select 8 deterministic COCO images
 # ------------------------------------------------------------
 
 tiny_indices = []
@@ -101,22 +110,27 @@ for dataset_index, image_id in enumerate(
 
 assert len(tiny_indices) == 8
 
+
 tiny_dataset = Subset(
     train_dataset,
     tiny_indices
 )
 
+
 tiny_loader = DataLoader(
     tiny_dataset,
+
     batch_size=min(
         CONFIG["batch_size"],
         len(tiny_dataset)
     ),
+
     shuffle=True,
     num_workers=0,
     pin_memory=True,
     collate_fn=centernet_collate_fn
 )
+
 
 print("Tiny images :", len(tiny_dataset))
 
@@ -131,12 +145,9 @@ optimizer = build_source_optimizer(
     model
 )
 
-scaler = torch.amp.GradScaler(
-    "cuda",
-    enabled=True
-)
-
 TINY_STEPS = 300
+
+GRAD_CLIP_NORM = 10.0
 
 tiny_losses = []
 
@@ -176,6 +187,17 @@ for step in range(
         non_blocking=True
     )
 
+
+    if not torch.isfinite(
+        images
+    ).all():
+
+        raise FloatingPointError(
+            f"Non-finite input image "
+            f"at tiny step {step}."
+        )
+
+
     encoded_targets = \
         build_batch_centernet_targets(
             targets,
@@ -185,8 +207,6 @@ for step in range(
 
     model.train()
 
-    # model.train() activates every BN,
-    # therefore set backbone BN back to eval.
     set_backbone_bn_eval(
         model
     )
@@ -197,39 +217,90 @@ for step in range(
     )
 
 
+    # --------------------------------------------------------
+    # BF16 model forward
+    # --------------------------------------------------------
+
     with torch.amp.autocast(
         device_type="cuda",
-        dtype=torch.float16
+        dtype=torch.bfloat16
     ):
 
         outputs = model(
             images
         )
 
-        losses = criterion(
-            outputs,
-            encoded_targets
-        )
 
-        total_loss = losses[
-            "loss_total"
-        ]
+    # --------------------------------------------------------
+    # Check model outputs BEFORE loss
+    # --------------------------------------------------------
+
+    for name, tensor in outputs.items():
+
+        if not torch.isfinite(
+            tensor
+        ).all():
+
+            raise FloatingPointError(
+                f"Non-finite model output "
+                f"'{name}' at tiny step {step}."
+            )
 
 
-    assert torch.isfinite(
-        total_loss
-    ), "Tiny-overfit loss became NaN/Inf."
+    # --------------------------------------------------------
+    # Criterion from Step 24 computes loss in FP32
+    # --------------------------------------------------------
 
-
-    scaler.scale(
-        total_loss
-    ).backward()
-
-    scaler.step(
-        optimizer
+    losses = criterion(
+        outputs,
+        encoded_targets
     )
 
-    scaler.update()
+
+    total_loss = losses[
+        "loss_total"
+    ]
+
+
+    if not torch.isfinite(
+        total_loss
+    ):
+
+        raise FloatingPointError(
+            f"Non-finite tiny loss "
+            f"at step {step}. "
+            f"hm={float(losses['loss_heatmap'].detach()):.6f}, "
+            f"wh={float(losses['loss_wh'].detach()):.6f}, "
+            f"off={float(losses['loss_offset'].detach()):.6f}"
+        )
+
+
+    # --------------------------------------------------------
+    # BF16 does NOT need GradScaler
+    # --------------------------------------------------------
+
+    total_loss.backward()
+
+
+    grad_norm = \
+        torch.nn.utils.clip_grad_norm_(
+            model.parameters(),
+            max_norm=GRAD_CLIP_NORM,
+            error_if_nonfinite=False
+        )
+
+
+    if not torch.isfinite(
+        grad_norm
+    ):
+
+        raise FloatingPointError(
+            f"Non-finite gradient "
+            f"at tiny step {step}."
+        )
+
+
+    optimizer.step()
 
 
     loss_value = float(
@@ -248,7 +319,9 @@ for step in range(
 
         print(
             f"Step {step:03d}/{TINY_STEPS} | "
-            f"loss = {loss_value:.4f}"
+            f"loss = {loss_value:.4f} | "
+            f"grad_norm = "
+            f"{float(grad_norm.detach()):.4f}"
         )
 
 
@@ -268,6 +341,7 @@ reduction = (
     1.0
     - last_window / first_window
 )
+
 
 print("\n" + "=" * 70)
 print("TINY OVERFIT RESULT")
@@ -297,4 +371,7 @@ assert (
     "loss tidak turun minimal 50%."
 )
 
-print("\nSTEP 28 PASSED — MODEL CAN LEARN / OVERFIT TINY COCO SET")
+
+print("\nPrecision mode : BF16 forward + FP32 loss")
+print("GradScaler     : NOT USED")
+print("STEP 28 PASSED — MODEL CAN LEARN")
