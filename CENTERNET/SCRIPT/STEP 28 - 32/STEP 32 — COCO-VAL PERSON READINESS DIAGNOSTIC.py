@@ -1,52 +1,72 @@
 # ============================================================
 # STEP 32 — COCO-VAL PERSON READINESS DIAGNOSTIC
-# BF16 VERSION
+# FAST-REPRO V1 — BF16
 #
-# Primary score threshold = 0.50
-# Primary IoU threshold   = 0.50
+# Primary:
+# Score >= 0.50
+# IoU   >= 0.50
+#
+# Diagnostic sweep:
+# 0.05 / 0.10 / 0.20 / 0.30 / 0.40 / 0.50
 # ============================================================
 
 import os
 import torch
 
+
 print("=" * 70)
-print("STEP 32 — PERSON READINESS DIAGNOSTIC (BF16)")
+print("STEP 32 — PERSON READINESS DIAGNOSTIC")
+print("FAST-REPRO V1 — BF16")
 print("=" * 70)
 
 
 assert torch.cuda.is_available()
+
 assert torch.cuda.is_bf16_supported()
 
 
-# ------------------------------------------------------------
-# Ensure best_model exists
-# ------------------------------------------------------------
+# ============================================================
+# ENSURE BEST MODEL EXISTS
+# ============================================================
 
 if "best_model" not in globals():
+
 
     assert os.path.exists(
         BEST_CHECKPOINT
     ), (
         "BEST_CHECKPOINT tidak ditemukan. "
-        "Step 30 harus selesai terlebih dahulu."
+        "Step 30 harus selesai."
     )
 
 
-    best_model = CenterNetResNet101(
-        num_classes=
-            CONFIG["num_classes"],
-        pretrained_backbone=False
-    ).to(device)
+    best_model = \
+        CenterNetResNet101(
+
+            num_classes=
+                CONFIG[
+                    "num_classes"
+                ],
+
+            pretrained_backbone=False
+
+        ).to(
+            device
+        )
 
 
     checkpoint = torch.load(
+
         BEST_CHECKPOINT,
+
         map_location=device,
+
         weights_only=False
     )
 
 
     best_model.load_state_dict(
+
         checkpoint[
             "model_state_dict"
         ]
@@ -56,34 +76,44 @@ if "best_model" not in globals():
 best_model.eval()
 
 
-# ------------------------------------------------------------
-# Check model parameters
-# ------------------------------------------------------------
+# ============================================================
+# PARAMETER HEALTH CHECK
+# ============================================================
 
 for name, parameter \
     in best_model.named_parameters():
+
 
     if not torch.isfinite(
         parameter
     ).all():
 
         raise FloatingPointError(
+
             f"Best model contains "
-            f"non-finite parameter: {name}"
+            f"non-finite parameter: "
+            f"{name}"
         )
 
 
-PERSON_CLASS = CONFIG[
-    "person_class_index"
-]
+# ============================================================
+# LOCKED PERSON CONFIG
+# ============================================================
+
+PERSON_CLASS = \
+    CONFIG[
+        "person_class_index"
+    ]
 
 
-IOU_THRESHOLD = CONFIG[
-    "iou_threshold"
-]
+IOU_THRESHOLD = \
+    CONFIG[
+        "iou_threshold"
+    ]
 
 
 SCORE_THRESHOLDS = [
+
     0.05,
     0.10,
     0.20,
@@ -96,6 +126,7 @@ SCORE_THRESHOLDS = [
 threshold_counts = {
 
     threshold: {
+
         "tp": 0,
         "fp": 0,
         "fn": 0
@@ -108,14 +139,16 @@ threshold_counts = {
 
 geometry_matches = 0
 
+
 geometry_gt = 0
 
 
-# ------------------------------------------------------------
-# COCO-Val person diagnostic
-# ------------------------------------------------------------
+# ============================================================
+# FULL COCO-VAL PERSON DIAGNOSTIC
+# ============================================================
 
 with torch.no_grad():
+
 
     for batch_index, (
         images,
@@ -126,7 +159,9 @@ with torch.no_grad():
 
 
         images = images.to(
+
             device,
+
             non_blocking=True
         )
 
@@ -136,46 +171,48 @@ with torch.no_grad():
         ).all():
 
             raise FloatingPointError(
-                f"Non-finite validation input "
-                f"at batch {batch_index + 1}."
+
+                f"Non-finite "
+                f"validation input "
+                f"at batch "
+                f"{batch_index + 1}."
             )
 
 
         # ----------------------------------------------------
-        # BF16 forward
+        # BF16 MODEL FORWARD
         # ----------------------------------------------------
 
         with torch.amp.autocast(
+
             device_type="cuda",
-            dtype=torch.bfloat16
+
+            dtype=
+                torch.bfloat16
         ):
 
-            outputs = best_model(
-                images
-            )
 
-
-        # ----------------------------------------------------
-        # Check model output
-        # ----------------------------------------------------
-
-        for name, tensor \
-            in outputs.items():
-
-            if not torch.isfinite(
-                tensor
-            ).all():
-
-                raise FloatingPointError(
-                    f"Non-finite output "
-                    f"'{name}' during "
-                    f"person diagnostic "
-                    f"batch {batch_index + 1}."
+            outputs = \
+                best_model(
+                    images
                 )
 
 
+        assert_outputs_finite(
+
+            outputs,
+
+            context=(
+
+                f"during person "
+                f"diagnostic batch "
+                f"{batch_index + 1}."
+            )
+        )
+
+
         # ----------------------------------------------------
-        # Decoder in FP32
+        # FP32 DECODING
         # ----------------------------------------------------
 
         decode_outputs = {
@@ -188,29 +225,38 @@ with torch.no_grad():
         }
 
 
-        predictions = decode_centernet(
-            decode_outputs,
-            K=100,
-            score_threshold=0.0
-        )
+        predictions = \
+            decode_centernet(
+
+                decode_outputs,
+
+                K=100,
+
+                score_threshold=0.0
+            )
 
 
-        for prediction, target in zip(
-            predictions,
-            targets
-        ):
+        # ----------------------------------------------------
+        # IMAGE-LEVEL METRICS
+        # ----------------------------------------------------
+
+        for prediction, target \
+            in zip(
+                predictions,
+                targets
+            ):
 
 
             # ------------------------------------------------
-            # Geometry50
-            #
-            # class must match
+            # Geometry50:
+            # class-aware
             # IoU >= 0.50
             # confidence ignored
             # ------------------------------------------------
 
             geometry = \
                 greedy_detection_counts(
+
                     prediction,
                     target,
 
@@ -237,15 +283,16 @@ with torch.no_grad():
 
 
             # ------------------------------------------------
-            # Confidence threshold diagnostic sweep
+            # CONFIDENCE SWEEP
             # ------------------------------------------------
 
-            for threshold in \
-                SCORE_THRESHOLDS:
+            for threshold \
+                in SCORE_THRESHOLDS:
 
 
                 counts = \
                     greedy_detection_counts(
+
                         prediction,
                         target,
 
@@ -264,27 +311,30 @@ with torch.no_grad():
                     threshold
                 ][
                     "tp"
-                ] += counts[
-                    "tp"
-                ]
+                ] += \
+                    counts[
+                        "tp"
+                    ]
 
 
                 threshold_counts[
                     threshold
                 ][
                     "fp"
-                ] += counts[
-                    "fp"
-                ]
+                ] += \
+                    counts[
+                        "fp"
+                    ]
 
 
                 threshold_counts[
                     threshold
                 ][
                     "fn"
-                ] += counts[
-                    "fn"
-                ]
+                ] += \
+                    counts[
+                        "fn"
+                    ]
 
 
         if (
@@ -294,18 +344,22 @@ with torch.no_grad():
             ) % 250 == 0
         ):
 
+
             print(
-                "Processed val batches:",
+
+                "Processed val batches :",
                 batch_index + 1
             )
 
 
 # ============================================================
-# RESULTS
+# GEOMETRY RESULT
 # ============================================================
 
 geometry50 = (
+
     geometry_matches
+
     / max(
         geometry_gt,
         1
@@ -318,9 +372,11 @@ print(
     + "=" * 70
 )
 
+
 print(
     "PERSON READINESS — COCO-VAL"
 )
+
 
 print(
     "=" * 70
@@ -340,19 +396,26 @@ print(
 
 
 print(
+
     f"Geometry50         : "
     f"{geometry50:.4f}"
 )
 
+
+# ============================================================
+# CONFIDENCE SWEEP RESULTS
+# ============================================================
 
 print(
     "\n"
     + "-" * 70
 )
 
+
 print(
     "CONFIDENCE SWEEP — IoU >= 0.50"
 )
+
 
 print(
     "-" * 70
@@ -360,6 +423,7 @@ print(
 
 
 print(
+
     f"{'Score':<10}"
     f"{'Precision':<15}"
     f"{'Recall':<15}"
@@ -377,22 +441,25 @@ print(
 person_results = {}
 
 
-for threshold in \
-    SCORE_THRESHOLDS:
+for threshold \
+    in SCORE_THRESHOLDS:
 
 
-    counts = threshold_counts[
-        threshold
-    ]
+    counts = \
+        threshold_counts[
+            threshold
+        ]
 
 
     tp = counts[
         "tp"
     ]
 
+
     fp = counts[
         "fp"
     ]
+
 
     fn = counts[
         "fn"
@@ -400,7 +467,9 @@ for threshold in \
 
 
     precision = (
+
         tp
+
         / max(
             tp + fp,
             1
@@ -409,7 +478,9 @@ for threshold in \
 
 
     recall = (
+
         tp
+
         / max(
             tp + fn,
             1
@@ -439,11 +510,17 @@ for threshold in \
 
 
     print(
+
         f"{threshold:<10.2f}"
+
         f"{precision:<15.4f}"
+
         f"{recall:<15.4f}"
+
         f"{tp:<10d}"
+
         f"{fp:<10d}"
+
         f"{fn:<10d}"
     )
 
@@ -452,9 +529,10 @@ for threshold in \
 # PRIMARY LOCKED RESULT @ SCORE 0.50
 # ============================================================
 
-primary = person_results[
-    0.50
-]
+primary = \
+    person_results[
+        0.50
+    ]
 
 
 print(
@@ -462,9 +540,11 @@ print(
     + "=" * 70
 )
 
+
 print(
     "PRIMARY PERSON DIAGNOSTIC"
 )
+
 
 print(
     "=" * 70
@@ -475,9 +555,11 @@ print(
     "Score threshold : 0.50"
 )
 
+
 print(
     "IoU threshold   : 0.50"
 )
+
 
 print(
     "Forward dtype   : BF16"
@@ -485,24 +567,28 @@ print(
 
 
 print(
+
     f"Geometry50      : "
     f"{geometry50:.4f}"
 )
 
 
 print(
+
     f"Precision       : "
     f"{primary['precision']:.4f}"
 )
 
 
 print(
+
     f"Recall          : "
     f"{primary['recall']:.4f}"
 )
 
 
 print(
+
     "TP             :",
     primary[
         "tp"
@@ -511,6 +597,7 @@ print(
 
 
 print(
+
     "FP             :",
     primary[
         "fp"
@@ -519,6 +606,7 @@ print(
 
 
 print(
+
     "FN             :",
     primary[
         "fn"
@@ -535,6 +623,7 @@ print(
 print(
     "\nSTEP 32 COMPLETE"
 )
+
 
 print(
     "BASE / SOURCE PHASE COMPLETE"
