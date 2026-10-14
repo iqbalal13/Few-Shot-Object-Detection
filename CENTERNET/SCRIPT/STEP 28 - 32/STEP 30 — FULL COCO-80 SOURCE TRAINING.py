@@ -1,18 +1,22 @@
 # ============================================================
 # STEP 30 — FULL COCO-80 SOURCE TRAINING
-# FINAL BF16 VERSION
+# FAST-REPRO V1 — LOCKED
 #
-# - Resume from LAST completed epoch checkpoint
-# - Ignore legacy FP16 GradScaler state
-# - BF16 model forward
+# CLEAN experiment namespace
+#
+# - BF16 forward
 # - FP32 stable loss
-# - Gradient clipping
-# - Full COCO-Val every epoch
-# - Best by Geometry50
-# - Early stopping
+# - no GradScaler
+# - deterministic epoch-specific shuffle
+# - full COCO-Val every epoch
+# - best checkpoint by Geometry50
+# - validation-loss tie break
+# - early stopping patience = 2
+# - maximum 5 source epochs
 # ============================================================
 
 import os
+import gc
 import math
 import torch
 
@@ -20,13 +24,19 @@ from google.colab import drive
 
 
 print("=" * 70)
-print("STEP 30 — FULL COCO-80 SOURCE TRAINING (BF16)")
+print("STEP 30 — FULL COCO-80 SOURCE TRAINING")
+print("FAST-REPRO V1")
 print("=" * 70)
 
+
+# ============================================================
+# HARDWARE
+# ============================================================
 
 assert torch.cuda.is_available(), (
     "CUDA GPU tidak aktif."
 )
+
 
 assert torch.cuda.is_bf16_supported(), (
     "Current GPU does not support BF16."
@@ -38,18 +48,25 @@ print(
     torch.cuda.get_device_name(0)
 )
 
+
 print(
-    "Training dtype : BF16"
+    "Forward dtype  : BF16"
 )
+
 
 print(
     "Loss dtype     : FP32"
 )
 
 
-# ------------------------------------------------------------
-# Persistent Google Drive storage
-# ------------------------------------------------------------
+print(
+    "GradScaler     : OFF"
+)
+
+
+# ============================================================
+# GOOGLE DRIVE
+# ============================================================
 
 drive.mount(
     "/content/drive",
@@ -57,9 +74,18 @@ drive.mount(
 )
 
 
+# ============================================================
+# NEW CLEAN EXPERIMENT DIRECTORY
+#
+# Intentionally different from old baseline run.
+# ============================================================
+
 FULL_CHECKPOINT_DIR = (
-    "/content/drive/MyDrive/"
-    "CenterNet_COCO80_Source"
+
+    "/content/drive/"
+    "MyDrive/"
+    "CenterNet_COCO80_Source_"
+    "FAST_REPRO_V1"
 )
 
 
@@ -70,96 +96,150 @@ os.makedirs(
 
 
 BEST_CHECKPOINT = os.path.join(
+
     FULL_CHECKPOINT_DIR,
+
     "centernet_coco80_best.pth"
 )
 
 
 LAST_CHECKPOINT = os.path.join(
+
     FULL_CHECKPOINT_DIR,
+
     "centernet_coco80_last.pth"
 )
 
 
-# ------------------------------------------------------------
-# Configuration
-# ------------------------------------------------------------
+# ============================================================
+# LOCKED SOURCE TRAINING CONFIG
+# ============================================================
 
 MAX_SOURCE_EPOCHS = 5
 
-# Keep original scheduler horizon because
-# epoch-2 checkpoint was trained with T_max=25.
+
 SCHEDULER_TMAX = 25
 
+
 EARLY_STOPPING_PATIENCE = 2
+
 
 MIN_GEOMETRY_DELTA = 1e-4
 
 
+FULL_TRAIN_SEED_BASE = (
+    SEED
+    + 3000
+)
+
+
 print(
-    "Max source epochs       :",
+    "Experiment               :",
+    CONFIG[
+        "experiment_name"
+    ]
+)
+
+
+print(
+    "Checkpoint directory     :",
+    FULL_CHECKPOINT_DIR
+)
+
+
+print(
+    "Max source epochs        :",
     MAX_SOURCE_EPOCHS
 )
 
+
 print(
-    "Scheduler T_max         :",
+    "Scheduler T_max          :",
     SCHEDULER_TMAX
 )
 
+
 print(
-    "Early stopping patience :",
+    "Early stopping patience  :",
     EARLY_STOPPING_PATIENCE
 )
 
+
 print(
-    "Train images            :",
+    "Train images             :",
     len(train_dataset)
 )
 
+
 print(
-    "Val images              :",
+    "Val images               :",
     len(val_dataset)
 )
 
-print(
-    "Batch size              :",
-    CONFIG["batch_size"]
-)
 
 print(
-    "Score threshold         :",
+    "Batch size               :",
+    CONFIG[
+        "batch_size"
+    ]
+)
+
+
+print(
+    "Workers                  :",
+    CONFIG[
+        "num_workers"
+    ]
+)
+
+
+print(
+    "Prefetch factor          :",
+    CONFIG[
+        "prefetch_factor"
+    ]
+)
+
+
+print(
+    "Score threshold          :",
     CONFIG[
         "score_threshold"
     ]
 )
 
+
 print(
-    "IoU threshold           :",
+    "IoU threshold            :",
     CONFIG[
         "iou_threshold"
     ]
 )
 
+
 print(
-    "Best criterion          : "
+    "Best criterion           : "
     "highest Geometry50 "
     "(val-loss tie-break)"
 )
 
 
-# ------------------------------------------------------------
-# Parameter health check
-# ------------------------------------------------------------
+# ============================================================
+# MODEL FINITE CHECK
+# ============================================================
 
 def assert_model_finite(
     model,
     label="model"
 ):
 
+
     bad_parameters = []
+
 
     for name, parameter \
         in model.named_parameters():
+
 
         if not torch.isfinite(
             parameter
@@ -173,18 +253,87 @@ def assert_model_finite(
     if bad_parameters:
 
         raise FloatingPointError(
-            f"{label} contains non-finite "
-            f"parameters: "
+
+            f"{label} contains "
+            f"non-finite parameters: "
+
             f"{bad_parameters[:10]}"
         )
 
 
-# ------------------------------------------------------------
-# Build clean architecture
-# ------------------------------------------------------------
+# ============================================================
+# CHECK RESUME STATUS FIRST
+# ============================================================
 
-model = build_fresh_source_model()
+resume_checkpoint = None
 
+
+if os.path.exists(
+    LAST_CHECKPOINT
+):
+
+
+    print(
+        "\nFAST-REPRO LAST checkpoint detected."
+    )
+
+
+    resume_checkpoint = torch.load(
+
+        LAST_CHECKPOINT,
+
+        map_location=device,
+
+        weights_only=False
+    )
+
+
+# ============================================================
+# BUILD MODEL
+#
+# When resuming, ImageNet download is unnecessary because
+# every parameter will immediately be replaced by checkpoint.
+# ============================================================
+
+if resume_checkpoint is None:
+
+
+    model = \
+        CenterNetResNet101(
+
+            num_classes=
+                CONFIG[
+                    "num_classes"
+                ],
+
+            pretrained_backbone=True
+
+        ).to(
+            device
+        )
+
+
+else:
+
+
+    model = \
+        CenterNetResNet101(
+
+            num_classes=
+                CONFIG[
+                    "num_classes"
+                ],
+
+            pretrained_backbone=False
+
+        ).to(
+            device
+        )
+
+
+# ============================================================
+# OPTIMIZER / SCHEDULER
+# ============================================================
 
 optimizer = \
     build_source_optimizer(
@@ -194,45 +343,64 @@ optimizer = \
 
 scheduler = \
     torch.optim.lr_scheduler.CosineAnnealingLR(
+
         optimizer,
-        T_max=SCHEDULER_TMAX
+
+        T_max=
+            SCHEDULER_TMAX
     )
 
 
 start_epoch = 0
 
+
 best_geometry = -1.0
+
 
 best_val_loss = float(
     "inf"
 )
 
+
 history = []
+
 
 epochs_without_improvement = 0
 
 
-# ------------------------------------------------------------
-# Resume from LAST completed epoch
-# ------------------------------------------------------------
+# ============================================================
+# LOAD FAST-REPRO CHECKPOINT
+# ============================================================
 
-if os.path.exists(
-    LAST_CHECKPOINT
-):
-
-    print(
-        "\nPrevious LAST checkpoint detected."
-    )
+if resume_checkpoint is not None:
 
 
-    checkpoint = torch.load(
-        LAST_CHECKPOINT,
-        map_location=device,
-        weights_only=False
-    )
+    checkpoint = \
+        resume_checkpoint
+
+
+    checkpoint_experiment = \
+        checkpoint.get(
+            "experiment_name",
+            None
+        )
+
+
+    if checkpoint_experiment is not None:
+
+        assert (
+            checkpoint_experiment
+            == CONFIG[
+                "experiment_name"
+            ]
+        ), (
+            "Checkpoint berasal dari "
+            "experiment berbeda."
+        )
 
 
     model.load_state_dict(
+
         checkpoint[
             "model_state_dict"
         ]
@@ -240,12 +408,16 @@ if os.path.exists(
 
 
     assert_model_finite(
+
         model,
-        label="Loaded checkpoint model"
+
+        label=
+            "Loaded FAST-REPRO checkpoint"
     )
 
 
     optimizer.load_state_dict(
+
         checkpoint[
             "optimizer_state_dict"
         ]
@@ -253,26 +425,15 @@ if os.path.exists(
 
 
     scheduler.load_state_dict(
+
         checkpoint[
             "scheduler_state_dict"
         ]
     )
 
 
-    # IMPORTANT:
-    # DO NOT LOAD OLD FP16 GradScaler state.
-    if (
-        "scaler_state_dict"
-        in checkpoint
-    ):
-
-        print(
-            "Legacy FP16 GradScaler state "
-            "found → intentionally ignored."
-        )
-
-
     start_epoch = int(
+
         checkpoint[
             "epoch"
         ]
@@ -280,6 +441,7 @@ if os.path.exists(
 
 
     best_geometry = float(
+
         checkpoint.get(
             "best_geometry",
             -1.0
@@ -288,6 +450,7 @@ if os.path.exists(
 
 
     best_val_loss = float(
+
         checkpoint.get(
             "best_val_loss",
             float("inf")
@@ -303,6 +466,7 @@ if os.path.exists(
 
     epochs_without_improvement = \
         int(
+
             checkpoint.get(
                 "epochs_without_improvement",
                 0
@@ -311,128 +475,186 @@ if os.path.exists(
 
 
     print(
-        "Loaded completed epoch  :",
+        "Loaded completed epoch   :",
         start_epoch
     )
 
+
     print(
-        "Resume from epoch       :",
+        "Resume from epoch        :",
         start_epoch + 1
     )
 
+
     print(
-        "Best Geometry50         :",
+        "Best Geometry50          :",
         best_geometry
     )
 
+
     print(
-        "Best val loss           :",
+        "Best val loss            :",
         best_val_loss
     )
 
+
     print(
-        "Current learning rate   :",
+        "Current learning rate    :",
         optimizer.param_groups[
             0
-        ]["lr"]
+        ][
+            "lr"
+        ]
     )
 
 
 else:
 
-    print(
-        "\nNo LAST checkpoint found."
-    )
 
     print(
-        "Starting CLEAN COCO-80 "
-        "source training."
+        "\nStarting CLEAN "
+        "FAST-REPRO source training."
     )
 
 
-# ------------------------------------------------------------
-# BF16 CHECKPOINT FORWARD HEALTH TEST
-# ------------------------------------------------------------
+# ============================================================
+# RELEASE OLD GLOBAL TRAIN LOADER
+#
+# From this point Step 30 owns an independent train loader.
+# This avoids training-order dependence on Steps 25/29.
+# ============================================================
+
+if "train_loader" in globals():
+
+    try:
+        del train_loader
+    except Exception:
+        pass
+
+
+gc.collect()
+
+
+# ============================================================
+# INDEPENDENT FULL SOURCE TRAIN LOADER
+# ============================================================
+
+full_train_loader, \
+full_train_generator = \
+    build_train_loader(
+        FULL_TRAIN_SEED_BASE
+    )
+
 
 print(
-    "\nRunning checkpoint BF16 "
-    "forward health check..."
+    "\nFull source train batches :",
+    len(
+        full_train_loader
+    )
 )
 
 
-health_images, health_targets = next(
-    iter(train_loader)
+# ============================================================
+# BF16 MODEL HEALTH CHECK
+#
+# Use validation loader, NOT full_train_loader.
+# Therefore train shuffle generator remains untouched.
+# ============================================================
+
+print(
+    "\nRunning BF16 "
+    "checkpoint/model health check..."
 )
 
 
-health_images = health_images[
-    :1
-].to(
-    device,
-    non_blocking=True
+health_images, \
+health_targets = next(
+    iter(
+        val_loader
+    )
 )
+
+
+health_images = \
+    health_images[
+        :1
+    ].to(
+        device,
+        non_blocking=True
+    )
 
 
 with torch.no_grad():
 
+
     model.eval()
 
+
     with torch.amp.autocast(
+
         device_type="cuda",
-        dtype=torch.bfloat16
+
+        dtype=
+            torch.bfloat16
     ):
 
-        health_outputs = model(
-            health_images
-        )
+
+        health_outputs = \
+            model(
+                health_images
+            )
 
 
-for name, tensor in \
-    health_outputs.items():
+assert_outputs_finite(
 
-    if not torch.isfinite(
-        tensor
-    ).all():
+    health_outputs,
 
-        raise FloatingPointError(
-            "Loaded checkpoint failed "
-            f"BF16 forward health test: "
-            f"{name} contains NaN/Inf."
-        )
+    context=
+        "during Step-30 health check."
+)
 
 
 health_encoded = \
     build_batch_centernet_targets(
-        health_targets[:1],
+
+        health_targets[
+            :1
+        ],
+
         device=device
     )
 
 
-health_losses = criterion(
-    health_outputs,
-    health_encoded
-)
+health_losses = \
+    criterion(
+
+        health_outputs,
+
+        health_encoded
+    )
 
 
 if not torch.isfinite(
+
     health_losses[
         "loss_total"
     ]
+
 ):
 
     raise FloatingPointError(
-        "Loaded checkpoint produces "
-        "non-finite loss in BF16 "
-        "health test."
+        "Health-check loss "
+        "is NaN/Inf."
     )
 
 
 print(
-    "Checkpoint BF16 health check : PASSED"
+    "Health check : PASSED"
 )
 
+
 print(
-    "Health loss                  :",
+    "Health loss  :",
     float(
         health_losses[
             "loss_total"
@@ -442,6 +664,7 @@ print(
 
 
 del health_images
+del health_targets
 del health_outputs
 del health_encoded
 del health_losses
@@ -450,35 +673,43 @@ del health_losses
 torch.cuda.empty_cache()
 
 
-# ------------------------------------------------------------
-# Already completed?
-# ------------------------------------------------------------
+# ============================================================
+# ALREADY COMPLETE?
+# ============================================================
 
 if (
     start_epoch
     >= MAX_SOURCE_EPOCHS
 ):
 
-    print(
-        f"\nCheckpoint already completed "
-        f"epoch {start_epoch}."
-    )
 
     print(
-        "No additional source training required."
+
+        f"\nCheckpoint already "
+        f"completed epoch "
+        f"{start_epoch}."
+    )
+
+
+    print(
+        "No additional training required."
     )
 
 
 else:
 
+
     # ========================================================
-    # FULL TRAINING LOOP
+    # FULL SOURCE TRAINING
     # ========================================================
 
     for epoch_index in range(
+
         start_epoch,
+
         MAX_SOURCE_EPOCHS
     ):
+
 
         epoch_number = (
             epoch_index
@@ -491,11 +722,14 @@ else:
             + "=" * 70
         )
 
+
         print(
+
             f"FULL EPOCH "
             f"{epoch_number}/"
             f"{MAX_SOURCE_EPOCHS}"
         )
+
 
         print(
             "=" * 70
@@ -503,28 +737,63 @@ else:
 
 
         # ----------------------------------------------------
-        # TRAIN — FULL COCO-TRAIN
+        # DETERMINISTIC EPOCH-SPECIFIC SHUFFLE
+        #
+        # Epoch N always receives the same shuffle,
+        # regardless of interruption/resume.
+        # ----------------------------------------------------
+
+        epoch_seed = (
+
+            FULL_TRAIN_SEED_BASE
+
+            + epoch_number
+        )
+
+
+        full_train_generator.manual_seed(
+            epoch_seed
+        )
+
+
+        print(
+            "Epoch shuffle seed :",
+            epoch_seed
+        )
+
+
+        # ----------------------------------------------------
+        # TRAIN
         # ----------------------------------------------------
 
         train_stats = \
             train_centernet_epoch(
+
                 model,
-                train_loader,
+
+                full_train_loader,
+
                 optimizer,
+
                 max_batches=None
             )
 
 
         assert_model_finite(
+
             model,
+
             label=(
+
                 f"Model after "
-                f"epoch {epoch_number}"
+                f"epoch "
+                f"{epoch_number}"
             )
         )
 
 
         print(
+
             f"\nTraining epoch "
             f"{epoch_number} complete."
         )
@@ -535,14 +804,17 @@ else:
         # ----------------------------------------------------
 
         print(
-            "\nRunning full COCO-Val..."
+            "\nRunning FULL COCO-Val..."
         )
 
 
         val_stats = \
             evaluate_centernet(
+
                 model,
+
                 val_loader,
+
                 max_batches=None,
 
                 score_threshold=
@@ -558,7 +830,7 @@ else:
 
 
         # ----------------------------------------------------
-        # EPOCH RESULT
+        # RESULTS
         # ----------------------------------------------------
 
         print(
@@ -566,10 +838,13 @@ else:
             + "-" * 70
         )
 
+
         print(
+
             f"EPOCH "
             f"{epoch_number} RESULT"
         )
+
 
         print(
             "-" * 70
@@ -577,31 +852,42 @@ else:
 
 
         print(
+
             f"Train loss       : "
             f"{train_stats['loss']:.4f}"
         )
 
+
         print(
+
             f"Val loss         : "
             f"{val_stats['loss']:.4f}"
         )
 
+
         print(
+
             f"Geometry50       : "
             f"{val_stats['geometry50']:.4f}"
         )
 
+
         print(
+
             f"Precision@0.50   : "
             f"{val_stats['precision']:.4f}"
         )
 
+
         print(
+
             f"Recall@0.50      : "
             f"{val_stats['recall']:.4f}"
         )
 
+
         print(
+
             f"Learning rate    : "
             f"{optimizer.param_groups[0]['lr']:.8f}"
         )
@@ -611,6 +897,9 @@ else:
 
             "epoch":
                 epoch_number,
+
+            "epoch_seed":
+                epoch_seed,
 
             "train_loss":
                 train_stats[
@@ -648,72 +937,97 @@ else:
 
 
         # ----------------------------------------------------
-        # BEST CHECKPOINT
+        # BEST CHECKPOINT LOGIC
         # ----------------------------------------------------
 
-        current_geometry = float(
-            val_stats[
-                "geometry50"
-            ]
-        )
+        current_geometry = \
+            float(
+
+                val_stats[
+                    "geometry50"
+                ]
+            )
 
 
-        current_val_loss = float(
-            val_stats[
-                "loss"
-            ]
-        )
+        current_val_loss = \
+            float(
+
+                val_stats[
+                    "loss"
+                ]
+            )
 
 
         geometry_improved = (
+
             current_geometry
-            >
-            best_geometry
+
+            > best_geometry
             + MIN_GEOMETRY_DELTA
         )
 
 
         geometry_tied = \
             math.isclose(
+
                 current_geometry,
+
                 best_geometry,
+
                 rel_tol=0.0,
+
                 abs_tol=
                     MIN_GEOMETRY_DELTA
             )
 
 
         lower_loss_on_tie = (
+
             geometry_tied
+
             and current_val_loss
             < best_val_loss
         )
 
 
         is_best = (
+
             geometry_improved
+
             or lower_loss_on_tie
         )
 
 
+        # ----------------------------------------------------
+        # BEST
+        # ----------------------------------------------------
+
         if is_best:
+
 
             best_geometry = \
                 current_geometry
 
+
             best_val_loss = \
                 current_val_loss
+
 
             epochs_without_improvement = 0
 
 
             torch.save(
+
                 {
+
                     "model_state_dict":
                         model.state_dict(),
 
                     "epoch":
                         epoch_number,
+
+                    "epoch_seed":
+                        epoch_seed,
 
                     "val_stats":
                         val_stats,
@@ -724,9 +1038,16 @@ else:
                     "config":
                         CONFIG,
 
+                    "experiment_name":
+                        CONFIG[
+                            "experiment_name"
+                        ],
+
                     "precision_mode":
                         "bfloat16"
+
                 },
+
                 BEST_CHECKPOINT
             )
 
@@ -735,15 +1056,18 @@ else:
                 "\n★ NEW BEST SOURCE CHECKPOINT"
             )
 
+
             print(
                 "Geometry50 :",
                 best_geometry
             )
 
+
             print(
                 "Val loss   :",
                 best_val_loss
             )
+
 
             print(
                 "Saved to   :",
@@ -753,6 +1077,7 @@ else:
 
         else:
 
+
             epochs_without_improvement += 1
 
 
@@ -760,7 +1085,9 @@ else:
                 "\nNo new best checkpoint."
             )
 
+
             print(
+
                 "Patience : "
                 f"{epochs_without_improvement}/"
                 f"{EARLY_STOPPING_PATIENCE}"
@@ -768,20 +1095,20 @@ else:
 
 
         # ----------------------------------------------------
-        # Scheduler
+        # SCHEDULER
         # ----------------------------------------------------
 
         scheduler.step()
 
 
         # ----------------------------------------------------
-        # LAST CHECKPOINT
-        #
-        # NO GradScaler state is saved anymore.
+        # LAST COMPLETED-EPOCH CHECKPOINT
         # ----------------------------------------------------
 
         torch.save(
+
             {
+
                 "model_state_dict":
                     model.state_dict(),
 
@@ -793,6 +1120,9 @@ else:
 
                 "epoch":
                     epoch_number,
+
+                "epoch_seed":
+                    epoch_seed,
 
                 "best_geometry":
                     best_geometry,
@@ -809,15 +1139,22 @@ else:
                 "config":
                     CONFIG,
 
+                "experiment_name":
+                    CONFIG[
+                        "experiment_name"
+                    ],
+
                 "precision_mode":
                     "bfloat16"
+
             },
+
             LAST_CHECKPOINT
         )
 
 
         print(
-            "\nLast completed-epoch "
+            "\nLAST completed-epoch "
             "checkpoint saved."
         )
 
@@ -827,67 +1164,98 @@ else:
         # ----------------------------------------------------
 
         if (
+
             epochs_without_improvement
+
             >= EARLY_STOPPING_PATIENCE
         ):
+
 
             print(
                 "\n"
                 + "=" * 70
             )
 
+
             print(
                 "EARLY STOPPING TRIGGERED"
             )
+
 
             print(
                 "=" * 70
             )
 
+
             print(
+
                 "Geometry50 did not improve "
-                f"for {EARLY_STOPPING_PATIENCE} "
+                f"for "
+                f"{EARLY_STOPPING_PATIENCE} "
                 "consecutive epochs."
             )
+
 
             break
 
 
-# ------------------------------------------------------------
+# ============================================================
 # FINAL STATUS
-# ------------------------------------------------------------
+# ============================================================
 
 print(
     "\n"
     + "=" * 70
 )
 
+
 print(
     "FULL COCO-80 SOURCE TRAINING FINISHED"
 )
 
+
+print(
+    "FAST-REPRO V1"
+)
+
+
 print(
     "=" * 70
 )
+
 
 print(
     "Best Geometry50 :",
     best_geometry
 )
 
+
 print(
     "Best checkpoint :",
     BEST_CHECKPOINT
 )
+
 
 print(
     "Last checkpoint :",
     LAST_CHECKPOINT
 )
 
+
 print(
-    "Precision mode  : BF16"
+    "Forward dtype   : BF16"
 )
+
+
+print(
+    "Loss dtype      : FP32"
+)
+
+
+print(
+    "GradScaler      : OFF"
+)
+
 
 print(
     "\nSTEP 30 PASSED"
