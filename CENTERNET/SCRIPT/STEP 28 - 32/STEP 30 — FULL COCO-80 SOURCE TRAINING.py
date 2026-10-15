@@ -1,71 +1,64 @@
+
 # ============================================================
-# STEP 30 — FULL COCO-80 SOURCE TRAINING
-# FAST-REPRO V1 — LOCKED
-#
-# CLEAN experiment namespace
-#
-# - BF16 forward
-# - FP32 stable loss
-# - no GradScaler
-# - deterministic epoch-specific shuffle
-# - full COCO-Val every epoch
-# - best checkpoint by Geometry50
-# - validation-loss tie break
-# - early stopping patience = 2
-# - maximum 5 source epochs
+# STEP 30 — CENTERNET-FSOD BALANCED80K V1.2
+# FRESH SOURCE TRAINING: 10 epochs x 8000 images
+# 100 selections/class/epoch, batch=8
+# 1000 updates/epoch = 10000 updates total
 # ============================================================
 
 import os
 import gc
+import json
 import math
-import torch
+import time
+import random
+import hashlib
+from collections import Counter
 
+import numpy as np
+import torch
+from torch.utils.data import Sampler
 from google.colab import drive
 
-
-print("=" * 70)
-print("STEP 30 — FULL COCO-80 SOURCE TRAINING")
-print("FAST-REPRO V1")
-print("=" * 70)
-
-
 # ============================================================
-# HARDWARE
+# 1. LOCKED PROTOCOL CHECKS
 # ============================================================
 
-assert torch.cuda.is_available(), (
-    "CUDA GPU tidak aktif."
+assert torch.cuda.is_available(), "Select GPU in Colab Runtime."
+assert torch.cuda.is_bf16_supported(), "BF16 GPU required."
+
+assert CONFIG["experiment_name"] == (
+    "CenterNet_COCO80_FSOD_BALANCED80K_V1_2_BS8"
 )
 
+assert CONFIG["source_epochs"] == 10
+assert CONFIG["source_images_per_epoch"] == 8000
+assert CONFIG["source_images_total"] == 80000
+assert CONFIG["source_images_per_class_per_epoch"] == 100
+assert CONFIG["num_classes"] == 80
+assert CONFIG["batch_size"] == 8
+assert CONFIG["max_objects"] == 128
 
-assert torch.cuda.is_bf16_supported(), (
-    "Current GPU does not support BF16."
+assert len(train_dataset) == 118287
+assert len(val_dataset) == 5000
+
+EPOCHS = CONFIG["source_epochs"]
+IMAGES_PER_EPOCH = CONFIG["source_images_per_epoch"]
+
+STEPS_PER_EPOCH = (
+    IMAGES_PER_EPOCH // CONFIG["batch_size"]
 )
 
+SCHEDULER_TMAX = 25
+MIN_GEOMETRY_DELTA = 1e-4
 
-print(
-    "GPU            :",
-    torch.cuda.get_device_name(0)
+MANIFEST_SEED = (
+    int(SEED)
+    + int(CONFIG["source_manifest_seed_offset"])
 )
-
-
-print(
-    "Forward dtype  : BF16"
-)
-
-
-print(
-    "Loss dtype     : FP32"
-)
-
-
-print(
-    "GradScaler     : OFF"
-)
-
 
 # ============================================================
-# GOOGLE DRIVE
+# 2. INDEPENDENT 80K EXPERIMENT DIRECTORY
 # ============================================================
 
 drive.mount(
@@ -73,1190 +66,927 @@ drive.mount(
     force_remount=False
 )
 
-
-# ============================================================
-# NEW CLEAN EXPERIMENT DIRECTORY
-#
-# Intentionally different from old baseline run.
-# ============================================================
-
 FULL_CHECKPOINT_DIR = (
-
-    "/content/drive/"
-    "MyDrive/"
-    "CenterNet_COCO80_Source_"
-    "FAST_REPRO_V1"
+    "/content/drive/MyDrive/"
+    "CenterNet_COCO80_Source_BALANCED80K_V1_2_BS8"
 )
-
 
 os.makedirs(
     FULL_CHECKPOINT_DIR,
     exist_ok=True
 )
 
-
 BEST_CHECKPOINT = os.path.join(
-
     FULL_CHECKPOINT_DIR,
-
     "centernet_coco80_best.pth"
 )
 
-
 LAST_CHECKPOINT = os.path.join(
-
     FULL_CHECKPOINT_DIR,
-
     "centernet_coco80_last.pth"
 )
 
+MANIFEST_FILE = os.path.join(
+    FULL_CHECKPOINT_DIR,
+    "balanced80k_manifest.jsonl"
+)
+
+HISTORY_FILE = os.path.join(
+    FULL_CHECKPOINT_DIR,
+    "training_history.json"
+)
 
 # ============================================================
-# LOCKED SOURCE TRAINING CONFIG
+# 3. CATEGORY POOL — SAME RULES AS STEPS 10/11/16
 # ============================================================
 
-MAX_SOURCE_EPOCHS = 5
+def valid_target_categories(image_id):
 
+    coco = train_dataset.coco
+    info = coco.imgs[image_id]
 
-SCHEDULER_TMAX = 25
+    size = int(CONFIG["input_size"])
 
+    scale = min(
+        size / info["width"],
+        size / info["height"]
+    )
 
-EARLY_STOPPING_PATIENCE = 2
+    pad_x = (
+        size - round(info["width"] * scale)
+    ) // 2
 
+    pad_y = (
+        size - round(info["height"] * scale)
+    ) // 2
 
-MIN_GEOMETRY_DELTA = 1e-4
-
-
-FULL_TRAIN_SEED_BASE = (
-    SEED
-    + 3000
-)
-
-
-print(
-    "Experiment               :",
-    CONFIG[
-        "experiment_name"
+    annotations = [
+        ann
+        for ann in coco.imgToAnns.get(image_id, [])
+        if not ann.get("iscrowd", 0)
+        and ann["bbox"][2] > 1
+        and ann["bbox"][3] > 1
+        and ann["category_id"]
+        in train_dataset.cat_id_to_contiguous
     ]
-)
 
+    if not annotations:
+        return set()
 
-print(
-    "Checkpoint directory     :",
-    FULL_CHECKPOINT_DIR
-)
+    boxes = np.asarray(
+        [
+            [x, y, x + w, y + h]
+            for ann in annotations
+            for x, y, w, h in [ann["bbox"]]
+        ],
+        dtype=np.float32
+    )
 
+    boxes[:, [0, 2]] *= scale
+    boxes[:, [1, 3]] *= scale
 
-print(
-    "Max source epochs        :",
-    MAX_SOURCE_EPOCHS
-)
+    boxes[:, [0, 2]] += pad_x
+    boxes[:, [1, 3]] += pad_y
 
+    boxes[:, [0, 2]] = np.clip(
+        boxes[:, [0, 2]],
+        0,
+        size - 1
+    )
 
-print(
-    "Scheduler T_max          :",
-    SCHEDULER_TMAX
-)
+    boxes[:, [1, 3]] = np.clip(
+        boxes[:, [1, 3]],
+        0,
+        size - 1
+    )
 
+    valid = (
+        (boxes[:, 2] - boxes[:, 0] > 1)
+        & (boxes[:, 3] - boxes[:, 1] > 1)
+    )
 
-print(
-    "Early stopping patience  :",
-    EARLY_STOPPING_PATIENCE
-)
+    centers_x = (
+        (boxes[:, 0] + boxes[:, 2])
+        / (2 * CONFIG["output_stride"])
+    )
 
+    centers_y = (
+        (boxes[:, 1] + boxes[:, 3])
+        / (2 * CONFIG["output_stride"])
+    )
 
-print(
-    "Train images             :",
-    len(train_dataset)
-)
+    out_size = (
+        size // CONFIG["output_stride"]
+    )
 
+    valid &= (
+        (centers_x >= 0)
+        & (centers_x < out_size)
+    )
 
-print(
-    "Val images               :",
-    len(val_dataset)
-)
+    valid &= (
+        (centers_y >= 0)
+        & (centers_y < out_size)
+    )
 
+    result = set()
+    included = 0
 
-print(
-    "Batch size               :",
-    CONFIG[
-        "batch_size"
-    ]
-)
+    for ann, good in zip(annotations, valid):
 
+        if not good:
+            continue
 
-print(
-    "Workers                  :",
-    CONFIG[
-        "num_workers"
-    ]
-)
+        result.add(
+            ann["category_id"]
+        )
 
+        included += 1
 
-print(
-    "Prefetch factor          :",
-    CONFIG[
-        "prefetch_factor"
-    ]
-)
+        if included >= CONFIG["max_objects"]:
+            break
 
-
-print(
-    "Score threshold          :",
-    CONFIG[
-        "score_threshold"
-    ]
-)
-
-
-print(
-    "IoU threshold            :",
-    CONFIG[
-        "iou_threshold"
-    ]
-)
-
-
-print(
-    "Best criterion           : "
-    "highest Geometry50 "
-    "(val-loss tie-break)"
-)
+    return result
 
 
 # ============================================================
-# MODEL FINITE CHECK
+# 4. DETERMINISTIC BALANCED80K MANIFEST
 # ============================================================
 
-def assert_model_finite(
-    model,
-    label="model"
-):
+def build_balanced80k_manifest():
 
+    image_to_index = {
+        image_id: idx
+        for idx, image_id in enumerate(
+            train_dataset.image_ids
+        )
+    }
 
-    bad_parameters = []
+    pools = {
+        cat_id: []
+        for cat_id in train_dataset.cat_ids
+    }
 
+    for image_id in train_dataset.image_ids:
 
-    for name, parameter \
-        in model.named_parameters():
+        categories = valid_target_categories(
+            image_id
+        )
 
+        for cat_id in categories:
+            pools[cat_id].append(image_id)
 
-        if not torch.isfinite(
-            parameter
-        ).all():
+    assert len(pools) == 80
 
-            bad_parameters.append(
-                name
+    assert all(
+        len(pool) > 0
+        for pool in pools.values()
+    ), "Empty category pool detected."
+
+    streams = {}
+
+    for cat_id, pool in pools.items():
+
+        ids = sorted(pool)
+
+        rng = random.Random(
+            MANIFEST_SEED
+            + int(cat_id) * 1000003
+        )
+
+        rng.shuffle(ids)
+
+        streams[cat_id] = {
+            "ids": ids,
+            "rng": rng,
+            "cursor": 0
+        }
+
+    def next_image(cat_id):
+
+        stream = streams[cat_id]
+
+        if stream["cursor"] >= len(stream["ids"]):
+
+            stream["rng"].shuffle(
+                stream["ids"]
             )
 
+            stream["cursor"] = 0
 
-    if bad_parameters:
+        image_id = stream["ids"][
+            stream["cursor"]
+        ]
 
-        raise FloatingPointError(
+        stream["cursor"] += 1
 
-            f"{label} contains "
-            f"non-finite parameters: "
+        return image_id
 
-            f"{bad_parameters[:10]}"
+    manifest = []
+
+    for epoch in range(1, EPOCHS + 1):
+
+        categories = [
+            cat_id
+            for cat_id in train_dataset.cat_ids
+            for _ in range(
+                CONFIG[
+                    "source_images_per_class_per_epoch"
+                ]
+            )
+        ]
+
+        random.Random(
+            MANIFEST_SEED + 3000000 + epoch
+        ).shuffle(categories)
+
+        used_in_epoch = set()
+
+        for position, cat_id in enumerate(
+            categories
+        ):
+
+            chosen = None
+
+            for _ in range(
+                len(streams[cat_id]["ids"])
+            ):
+
+                candidate = next_image(
+                    cat_id
+                )
+
+                if candidate not in used_in_epoch:
+                    chosen = candidate
+                    break
+
+            if chosen is None:
+                chosen = next_image(cat_id)
+
+            used_in_epoch.add(chosen)
+
+            manifest.append({
+                "epoch": epoch,
+                "position": position,
+                "selected_category_id": int(cat_id),
+                "image_id": int(chosen),
+                "dataset_index": int(
+                    image_to_index[chosen]
+                )
+            })
+
+    return manifest
+
+
+# ============================================================
+# 5. EPOCH-SPECIFIC SAMPLER
+# ============================================================
+
+class BalancedManifestSampler(Sampler):
+
+    def __init__(self, manifest):
+
+        self.indices_by_epoch = {
+            epoch: [
+                row["dataset_index"]
+                for row in manifest
+                if row["epoch"] == epoch
+            ]
+            for epoch in range(
+                1,
+                EPOCHS + 1
+            )
+        }
+
+        assert all(
+            len(indices) == IMAGES_PER_EPOCH
+            for indices
+            in self.indices_by_epoch.values()
+        )
+
+        self.epoch = 1
+
+    def set_epoch(self, epoch):
+
+        assert 1 <= epoch <= EPOCHS
+
+        self.epoch = epoch
+
+    def __iter__(self):
+
+        return iter(
+            self.indices_by_epoch[self.epoch]
+        )
+
+    def __len__(self):
+
+        return len(
+            self.indices_by_epoch[self.epoch]
         )
 
 
 # ============================================================
-# CHECK RESUME STATUS FIRST
+# 6. BUILD AND VALIDATE MANIFEST
 # ============================================================
 
-resume_checkpoint = None
+print(
+    "Building Balanced80K manifest "
+    "from COCO train2017..."
+)
 
+source_manifest = build_balanced80k_manifest()
 
-if os.path.exists(
-    LAST_CHECKPOINT
-):
+assert len(source_manifest) == (
+    CONFIG["source_images_total"]
+)
 
+for epoch in range(1, EPOCHS + 1):
 
-    print(
-        "\nFAST-REPRO LAST checkpoint detected."
+    counts = Counter(
+        row["selected_category_id"]
+        for row in source_manifest
+        if row["epoch"] == epoch
     )
 
+    assert len(counts) == 80
 
-    resume_checkpoint = torch.load(
+    assert all(
+        counts[cat_id] == 100
+        for cat_id in train_dataset.cat_ids
+    )
 
+    assert sum(counts.values()) == IMAGES_PER_EPOCH
+
+
+manifest_bytes = b"".join(
+    (
+        json.dumps(
+            row,
+            sort_keys=True,
+            separators=(",", ":")
+        ) + "\n"
+    ).encode("utf-8")
+    for row in source_manifest
+)
+
+source_manifest_sha256 = hashlib.sha256(
+    manifest_bytes
+).hexdigest()
+
+if os.path.isfile(MANIFEST_FILE):
+
+    with open(MANIFEST_FILE, "rb") as f:
+
+        if f.read() != manifest_bytes:
+            raise RuntimeError(
+                "Manifest mismatch: use a separate "
+                "experiment directory."
+            )
+
+else:
+
+    with open(
+        MANIFEST_FILE + ".tmp",
+        "wb"
+    ) as f:
+        f.write(manifest_bytes)
+
+    os.replace(
+        MANIFEST_FILE + ".tmp",
+        MANIFEST_FILE
+    )
+
+print(
+    "Manifest SHA256:",
+    source_manifest_sha256
+)
+
+print(
+    "Image exposures:",
+    len(source_manifest)
+)
+
+print(
+    "Unique image IDs:",
+    len({
+        row["image_id"]
+        for row in source_manifest
+    })
+)
+
+print(
+    "Optimizer updates:",
+    EPOCHS * STEPS_PER_EPOCH
+)
+
+
+# ============================================================
+# 7. FRESH MODEL INITIALIZATION
+# INTERNAL RESUME ONLY FOR INTERRUPTED 80K RUNS
+# ============================================================
+
+resume = None
+
+if os.path.isfile(LAST_CHECKPOINT):
+
+    resume = torch.load(
         LAST_CHECKPOINT,
-
-        map_location=device,
-
+        map_location="cpu",
         weights_only=False
     )
 
+    assert resume.get(
+        "experiment_name"
+    ) == CONFIG["experiment_name"]
 
-# ============================================================
-# BUILD MODEL
-#
-# When resuming, ImageNet download is unnecessary because
-# every parameter will immediately be replaced by checkpoint.
-# ============================================================
+    assert resume.get(
+        "source_manifest_sha256"
+    ) == source_manifest_sha256
 
-if resume_checkpoint is None:
+    assert resume.get(
+        "source_images_total"
+    ) == 80000
 
+    assert (
+        1 <= int(resume.get("epoch", -1))
+        <= EPOCHS
+    )
 
-    model = \
-        CenterNetResNet101(
+    assert len(resume.get(
+        "history", []
+    )) == int(resume["epoch"])
 
-            num_classes=
-                CONFIG[
-                    "num_classes"
-                ],
+    assert "rng_state" in resume
 
-            pretrained_backbone=True
-
-        ).to(
-            device
-        )
-
+    assert os.path.isfile(BEST_CHECKPOINT), (
+        "Last checkpoint exists but best is missing."
+    )
 
 else:
 
-
-    model = \
-        CenterNetResNet101(
-
-            num_classes=
-                CONFIG[
-                    "num_classes"
-                ],
-
-            pretrained_backbone=False
-
-        ).to(
-            device
+    if os.path.isfile(BEST_CHECKPOINT):
+        raise RuntimeError(
+            "Best exists but last is missing; "
+            "inspect experiment folder."
         )
 
+    random.seed(MANIFEST_SEED)
+    np.random.seed(MANIFEST_SEED)
 
-# ============================================================
-# OPTIMIZER / SCHEDULER
-# ============================================================
-
-optimizer = \
-    build_source_optimizer(
-        model
-    )
+    torch.manual_seed(MANIFEST_SEED)
+    torch.cuda.manual_seed_all(MANIFEST_SEED)
 
 
-scheduler = \
-    torch.optim.lr_scheduler.CosineAnnealingLR(
+model = CenterNetResNet101(
+    num_classes=CONFIG["num_classes"],
+    pretrained_backbone=(resume is None)
+).to(device)
 
-        optimizer,
-
-        T_max=
-            SCHEDULER_TMAX
-    )
-
-
-start_epoch = 0
-
-
-best_geometry = -1.0
-
-
-best_val_loss = float(
-    "inf"
+optimizer = build_source_optimizer(
+    model
 )
 
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    optimizer,
+    T_max=SCHEDULER_TMAX
+)
 
+start_epoch = 0
+best_geometry = -1.0
+best_val_loss = float("inf")
 history = []
 
-
-epochs_without_improvement = 0
-
-
-# ============================================================
-# LOAD FAST-REPRO CHECKPOINT
-# ============================================================
-
-if resume_checkpoint is not None:
-
-
-    checkpoint = \
-        resume_checkpoint
-
-
-    checkpoint_experiment = \
-        checkpoint.get(
-            "experiment_name",
-            None
-        )
-
-
-    if checkpoint_experiment is not None:
-
-        assert (
-            checkpoint_experiment
-            == CONFIG[
-                "experiment_name"
-            ]
-        ), (
-            "Checkpoint berasal dari "
-            "experiment berbeda."
-        )
-
+if resume is not None:
 
     model.load_state_dict(
-
-        checkpoint[
-            "model_state_dict"
-        ]
+        resume["model_state_dict"]
     )
-
-
-    assert_model_finite(
-
-        model,
-
-        label=
-            "Loaded FAST-REPRO checkpoint"
-    )
-
 
     optimizer.load_state_dict(
-
-        checkpoint[
-            "optimizer_state_dict"
-        ]
+        resume["optimizer_state_dict"]
     )
-
 
     scheduler.load_state_dict(
-
-        checkpoint[
-            "scheduler_state_dict"
-        ]
+        resume["scheduler_state_dict"]
     )
-
 
     start_epoch = int(
-
-        checkpoint[
-            "epoch"
-        ]
+        resume["epoch"]
     )
-
 
     best_geometry = float(
-
-        checkpoint.get(
-            "best_geometry",
-            -1.0
-        )
+        resume["best_geometry"]
     )
-
 
     best_val_loss = float(
-
-        checkpoint.get(
-            "best_val_loss",
-            float("inf")
-        )
+        resume["best_val_loss"]
     )
 
-
-    history = checkpoint.get(
-        "history",
-        []
+    history = list(
+        resume["history"]
     )
 
+    rs = resume["rng_state"]
 
-    epochs_without_improvement = \
-        int(
+    random.setstate(
+        rs["python"]
+    )
 
-            checkpoint.get(
-                "epochs_without_improvement",
-                0
-            )
-        )
+    np.random.set_state(
+        rs["numpy"]
+    )
 
+    torch.set_rng_state(
+        rs["torch_cpu"].cpu()
+    )
+
+    torch.cuda.set_rng_state_all(
+        rs["torch_cuda"]
+    )
 
     print(
-        "Loaded completed epoch   :",
+        "Resuming Balanced80K after epoch:",
         start_epoch
     )
 
-
-    print(
-        "Resume from epoch        :",
-        start_epoch + 1
-    )
-
-
-    print(
-        "Best Geometry50          :",
-        best_geometry
-    )
-
-
-    print(
-        "Best val loss            :",
-        best_val_loss
-    )
-
-
-    print(
-        "Current learning rate    :",
-        optimizer.param_groups[
-            0
-        ][
-            "lr"
-        ]
-    )
-
+    del resume
 
 else:
 
-
     print(
-        "\nStarting CLEAN "
-        "FAST-REPRO source training."
+        "Fresh 80K training from ImageNet "
+        "pretrained backbone"
     )
 
 
 # ============================================================
-# RELEASE OLD GLOBAL TRAIN LOADER
-#
-# From this point Step 30 owns an independent train loader.
-# This avoids training-order dependence on Steps 25/29.
+# 8. OPTIMIZED WORKER DATALOADERS
 # ============================================================
 
 if "train_loader" in globals():
-
-    try:
-        del train_loader
-    except Exception:
-        pass
-
+    del train_loader
 
 gc.collect()
 
+source_sampler = BalancedManifestSampler(
+    source_manifest
+)
 
-# ============================================================
-# INDEPENDENT FULL SOURCE TRAIN LOADER
-# ============================================================
-
-full_train_loader, \
-full_train_generator = \
+full_train_loader, full_train_generator = (
     build_train_loader(
-        FULL_TRAIN_SEED_BASE
+        MANIFEST_SEED,
+        sampler=source_sampler,
+        encoded=True
     )
+)
 
+source_val_loader, source_val_generator = (
+    build_val_loader(
+        SEED + 3301,
+        encoded=True
+    )
+)
+
+assert len(full_train_loader) == (
+    STEPS_PER_EPOCH == 1000
+)
+
+assert len(source_val_loader) == math.ceil(
+    5000 / CONFIG["batch_size"]
+)
 
 print(
-    "\nFull source train batches :",
-    len(
-        full_train_loader
-    )
+    "Train batches per epoch:",
+    len(full_train_loader)
+)
+
+print(
+    "Validation batches:",
+    len(source_val_loader)
 )
 
 
 # ============================================================
-# BF16 MODEL HEALTH CHECK
-#
-# Use validation loader, NOT full_train_loader.
-# Therefore train shuffle generator remains untouched.
+# 9. BF16 NUMERICAL HEALTH CHECK
 # ============================================================
 
-print(
-    "\nRunning BF16 "
-    "checkpoint/model health check..."
-)
+model.eval()
 
+health_image, health_target = val_dataset[0]
 
-health_images, \
-health_targets = next(
-    iter(
-        val_loader
-    )
-)
-
-
-health_images = \
-    health_images[
-        :1
-    ].to(
-        device,
-        non_blocking=True
-    )
-
-
-with torch.no_grad():
-
-
-    model.eval()
-
+with torch.inference_mode():
 
     with torch.amp.autocast(
-
         device_type="cuda",
-
-        dtype=
-            torch.bfloat16
+        dtype=torch.bfloat16
     ):
 
-
-        health_outputs = \
-            model(
-                health_images
+        health_outputs = model(
+            health_image.unsqueeze(0).to(
+                device
             )
+        )
 
+    assert_outputs_finite(
+        health_outputs,
+        "Step30 80K BF16 health"
+    )
 
-assert_outputs_finite(
-
-    health_outputs,
-
-    context=
-        "during Step-30 health check."
-)
-
-
-health_encoded = \
-    build_batch_centernet_targets(
-
-        health_targets[
-            :1
-        ],
-
+    encoded_health = build_batch_centernet_targets(
+        [health_target],
         device=device
     )
 
-
-health_losses = \
-    criterion(
-
+    health_loss = criterion(
         health_outputs,
+        encoded_health
+    )["loss_total"]
 
-        health_encoded
-    )
+    assert bool(
+        torch.isfinite(health_loss).item()
+    ), "Health loss NaN/Inf"
 
-
-if not torch.isfinite(
-
-    health_losses[
-        "loss_total"
-    ]
-
-):
-
-    raise FloatingPointError(
-        "Health-check loss "
-        "is NaN/Inf."
-    )
-
-
-print(
-    "Health check : PASSED"
-)
-
-
-print(
-    "Health loss  :",
-    float(
-        health_losses[
-            "loss_total"
-        ].detach()
-    )
-)
-
-
-del health_images
-del health_targets
+del health_image
+del health_target
 del health_outputs
-del health_encoded
-del health_losses
-
-
-torch.cuda.empty_cache()
+del encoded_health
+del health_loss
 
 
 # ============================================================
-# ALREADY COMPLETE?
+# 10. ATOMIC CHECKPOINT SAVE
 # ============================================================
 
-if (
-    start_epoch
-    >= MAX_SOURCE_EPOCHS
+def atomic_torch_save(payload, path):
+
+    tmp = path + ".tmp"
+
+    torch.save(payload, tmp)
+
+    os.replace(tmp, path)
+
+
+# ============================================================
+# 11. TRAINING — 10 EPOCHS
+# NO EARLY STOPPING
+# FULL COCO-VAL EACH EPOCH
+# ============================================================
+
+wall_start = time.perf_counter()
+
+for epoch in range(
+    start_epoch + 1,
+    EPOCHS + 1
 ):
 
-
-    print(
-
-        f"\nCheckpoint already "
-        f"completed epoch "
-        f"{start_epoch}."
+    source_sampler.set_epoch(
+        epoch
     )
 
-
-    print(
-        "No additional training required."
+    full_train_generator.manual_seed(
+        MANIFEST_SEED + epoch
     )
 
-
-else:
-
-
-    # ========================================================
-    # FULL SOURCE TRAINING
-    # ========================================================
-
-    for epoch_index in range(
-
-        start_epoch,
-
-        MAX_SOURCE_EPOCHS
-    ):
-
-
-        epoch_number = (
-            epoch_index
-            + 1
-        )
-
-
-        print(
-            "\n"
-            + "=" * 70
-        )
-
-
-        print(
-
-            f"FULL EPOCH "
-            f"{epoch_number}/"
-            f"{MAX_SOURCE_EPOCHS}"
-        )
-
-
-        print(
-            "=" * 70
-        )
-
-
-        # ----------------------------------------------------
-        # DETERMINISTIC EPOCH-SPECIFIC SHUFFLE
-        #
-        # Epoch N always receives the same shuffle,
-        # regardless of interruption/resume.
-        # ----------------------------------------------------
-
-        epoch_seed = (
-
-            FULL_TRAIN_SEED_BASE
-
-            + epoch_number
-        )
-
-
-        full_train_generator.manual_seed(
-            epoch_seed
-        )
-
-
-        print(
-            "Epoch shuffle seed :",
-            epoch_seed
-        )
-
-
-        # ----------------------------------------------------
-        # TRAIN
-        # ----------------------------------------------------
-
-        train_stats = \
-            train_centernet_epoch(
-
-                model,
-
-                full_train_loader,
-
-                optimizer,
-
-                max_batches=None
-            )
-
-
-        assert_model_finite(
-
-            model,
-
-            label=(
-
-                f"Model after "
-                f"epoch "
-                f"{epoch_number}"
-            )
-        )
-
-
-        print(
-
-            f"\nTraining epoch "
-            f"{epoch_number} complete."
-        )
-
-
-        # ----------------------------------------------------
-        # FULL COCO-VAL
-        # ----------------------------------------------------
-
-        print(
-            "\nRunning FULL COCO-Val..."
-        )
-
-
-        val_stats = \
-            evaluate_centernet(
-
-                model,
-
-                val_loader,
-
-                max_batches=None,
-
-                score_threshold=
-                    CONFIG[
-                        "score_threshold"
-                    ],
-
-                iou_threshold=
-                    CONFIG[
-                        "iou_threshold"
-                    ]
-            )
-
-
-        # ----------------------------------------------------
-        # RESULTS
-        # ----------------------------------------------------
-
-        print(
-            "\n"
-            + "-" * 70
-        )
-
-
-        print(
-
-            f"EPOCH "
-            f"{epoch_number} RESULT"
-        )
-
-
-        print(
-            "-" * 70
-        )
-
-
-        print(
-
-            f"Train loss       : "
-            f"{train_stats['loss']:.4f}"
-        )
-
-
-        print(
-
-            f"Val loss         : "
-            f"{val_stats['loss']:.4f}"
-        )
-
-
-        print(
-
-            f"Geometry50       : "
-            f"{val_stats['geometry50']:.4f}"
-        )
-
-
-        print(
-
-            f"Precision@0.50   : "
-            f"{val_stats['precision']:.4f}"
-        )
-
-
-        print(
-
-            f"Recall@0.50      : "
-            f"{val_stats['recall']:.4f}"
-        )
-
-
-        print(
-
-            f"Learning rate    : "
-            f"{optimizer.param_groups[0]['lr']:.8f}"
-        )
-
-
-        epoch_record = {
-
-            "epoch":
-                epoch_number,
-
-            "epoch_seed":
-                epoch_seed,
-
-            "train_loss":
-                train_stats[
-                    "loss"
-                ],
-
-            "val_loss":
-                val_stats[
-                    "loss"
-                ],
-
-            "geometry50":
-                val_stats[
-                    "geometry50"
-                ],
-
-            "precision":
-                val_stats[
-                    "precision"
-                ],
-
-            "recall":
-                val_stats[
-                    "recall"
-                ],
-
-            "precision_mode":
-                "bfloat16"
-        }
-
-
-        history.append(
-            epoch_record
-        )
-
-
-        # ----------------------------------------------------
-        # BEST CHECKPOINT LOGIC
-        # ----------------------------------------------------
-
-        current_geometry = \
-            float(
-
-                val_stats[
-                    "geometry50"
-                ]
-            )
-
-
-        current_val_loss = \
-            float(
-
-                val_stats[
-                    "loss"
-                ]
-            )
-
-
-        geometry_improved = (
-
-            current_geometry
-
-            > best_geometry
-            + MIN_GEOMETRY_DELTA
-        )
-
-
-        geometry_tied = \
+    print(
+        f"\nBALANCED80K epoch {epoch}/{EPOCHS} "
+        f"({STEPS_PER_EPOCH} steps)"
+    )
+
+    # --------------------------------------------------------
+    # TRAINING
+    # --------------------------------------------------------
+
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+
+    train_stats = train_centernet_epoch(
+        model,
+        full_train_loader,
+        optimizer,
+        max_batches=None
+    )
+
+    torch.cuda.synchronize()
+
+    train_seconds = (
+        time.perf_counter() - t0
+    )
+
+    assert train_stats["batches"] == STEPS_PER_EPOCH
+
+    # --------------------------------------------------------
+    # FULL COCO VALIDATION
+    # --------------------------------------------------------
+
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+
+    val_stats = evaluate_centernet(
+        model,
+        source_val_loader,
+        max_batches=None,
+        score_threshold=CONFIG["score_threshold"],
+        iou_threshold=CONFIG["iou_threshold"]
+    )
+
+    torch.cuda.synchronize()
+
+    val_seconds = (
+        time.perf_counter() - t0
+    )
+
+    # --------------------------------------------------------
+    # BEST CHECKPOINT CRITERION
+    # --------------------------------------------------------
+
+    geometry = float(
+        val_stats["geometry50"]
+    )
+
+    val_loss = float(
+        val_stats["loss"]
+    )
+
+    is_best = (
+        geometry > best_geometry + MIN_GEOMETRY_DELTA
+        or (
             math.isclose(
-
-                current_geometry,
-
+                geometry,
                 best_geometry,
-
-                rel_tol=0.0,
-
-                abs_tol=
-                    MIN_GEOMETRY_DELTA
+                rel_tol=0,
+                abs_tol=MIN_GEOMETRY_DELTA
             )
-
-
-        lower_loss_on_tie = (
-
-            geometry_tied
-
-            and current_val_loss
-            < best_val_loss
+            and val_loss < best_val_loss
         )
+    )
 
+    # --------------------------------------------------------
+    # EPOCH STATISTICS
+    # --------------------------------------------------------
 
-        is_best = (
+    record = {
+        "epoch": epoch,
+        "train_stats": train_stats,
+        "val_stats": val_stats,
+        "train_seconds": train_seconds,
+        "val_seconds": val_seconds,
+        "seconds_per_step": (
+            train_seconds / STEPS_PER_EPOCH
+        ),
+        "learning_rate_before_scheduler_step": (
+            optimizer.param_groups[0]["lr"]
+        ),
+        "exposures_seen": epoch * IMAGES_PER_EPOCH
+    }
 
-            geometry_improved
+    history.append(record)
 
-            or lower_loss_on_tie
-        )
+    print(
+        f"Epoch {epoch}/{EPOCHS} "
+        f"| train={train_seconds / 60:.2f}min "
+        f"| val={val_seconds / 60:.2f}min "
+        f"| {record['seconds_per_step']:.3f}s/step "
+        f"| Geometry50={geometry:.5f} "
+        f"| val_loss={val_loss:.5f}"
+    )
 
+    # --------------------------------------------------------
+    # BEST CHECKPOINT
+    # --------------------------------------------------------
 
-        # ----------------------------------------------------
-        # BEST
-        # ----------------------------------------------------
+    if is_best:
 
-        if is_best:
+        best_geometry = geometry
+        best_val_loss = val_loss
 
-
-            best_geometry = \
-                current_geometry
-
-
-            best_val_loss = \
-                current_val_loss
-
-
-            epochs_without_improvement = 0
-
-
-            torch.save(
-
-                {
-
-                    "model_state_dict":
-                        model.state_dict(),
-
-                    "epoch":
-                        epoch_number,
-
-                    "epoch_seed":
-                        epoch_seed,
-
-                    "val_stats":
-                        val_stats,
-
-                    "train_stats":
-                        train_stats,
-
-                    "config":
-                        CONFIG,
-
-                    "experiment_name":
-                        CONFIG[
-                            "experiment_name"
-                        ],
-
-                    "precision_mode":
-                        "bfloat16"
-
-                },
-
-                BEST_CHECKPOINT
-            )
-
-
-            print(
-                "\n★ NEW BEST SOURCE CHECKPOINT"
-            )
-
-
-            print(
-                "Geometry50 :",
-                best_geometry
-            )
-
-
-            print(
-                "Val loss   :",
-                best_val_loss
-            )
-
-
-            print(
-                "Saved to   :",
-                BEST_CHECKPOINT
-            )
-
-
-        else:
-
-
-            epochs_without_improvement += 1
-
-
-            print(
-                "\nNo new best checkpoint."
-            )
-
-
-            print(
-
-                "Patience : "
-                f"{epochs_without_improvement}/"
-                f"{EARLY_STOPPING_PATIENCE}"
-            )
-
-
-        # ----------------------------------------------------
-        # SCHEDULER
-        # ----------------------------------------------------
-
-        scheduler.step()
-
-
-        # ----------------------------------------------------
-        # LAST COMPLETED-EPOCH CHECKPOINT
-        # ----------------------------------------------------
-
-        torch.save(
-
+        atomic_torch_save(
             {
-
-                "model_state_dict":
-                    model.state_dict(),
-
-                "optimizer_state_dict":
-                    optimizer.state_dict(),
-
-                "scheduler_state_dict":
-                    scheduler.state_dict(),
-
-                "epoch":
-                    epoch_number,
-
-                "epoch_seed":
-                    epoch_seed,
-
-                "best_geometry":
-                    best_geometry,
-
-                "best_val_loss":
-                    best_val_loss,
-
-                "history":
-                    history,
-
-                "epochs_without_improvement":
-                    epochs_without_improvement,
-
-                "config":
-                    CONFIG,
-
-                "experiment_name":
-                    CONFIG[
-                        "experiment_name"
-                    ],
-
-                "precision_mode":
-                    "bfloat16"
-
+                "model_state_dict": model.state_dict(),
+                "epoch": epoch,
+                "actual_images_seen_at_checkpoint": (
+                    epoch * IMAGES_PER_EPOCH
+                ),
+                "train_stats": train_stats,
+                "val_stats": val_stats,
+                "config": dict(CONFIG),
+                "experiment_name": CONFIG[
+                    "experiment_name"
+                ],
+                "source_manifest_sha256": (
+                    source_manifest_sha256
+                ),
+                "source_images_total": CONFIG[
+                    "source_images_total"
+                ],
+                "precision_mode": "bfloat16"
             },
-
-            LAST_CHECKPOINT
+            BEST_CHECKPOINT
         )
-
 
         print(
-            "\nLAST completed-epoch "
-            "checkpoint saved."
+            "Saved new best checkpoint at epoch",
+            epoch
         )
 
+    # --------------------------------------------------------
+    # SCHEDULER
+    # --------------------------------------------------------
 
-        # ----------------------------------------------------
-        # EARLY STOPPING
-        # ----------------------------------------------------
+    scheduler.step()
 
-        if (
+    # --------------------------------------------------------
+    # LAST CHECKPOINT — INCLUDES RNG STATE
+    # --------------------------------------------------------
 
-            epochs_without_improvement
+    atomic_torch_save(
+        {
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "epoch": epoch,
+            "best_geometry": best_geometry,
+            "best_val_loss": best_val_loss,
+            "history": history,
+            "config": dict(CONFIG),
+            "experiment_name": CONFIG[
+                "experiment_name"
+            ],
+            "source_manifest_sha256": (
+                source_manifest_sha256
+            ),
+            "source_images_total": CONFIG[
+                "source_images_total"
+            ],
+            "rng_state": {
+                "python": random.getstate(),
+                "numpy": np.random.get_state(),
+                "torch_cpu": torch.get_rng_state(),
+                "torch_cuda": torch.cuda.get_rng_state_all()
+            }
+        },
+        LAST_CHECKPOINT
+    )
 
-            >= EARLY_STOPPING_PATIENCE
-        ):
+    # --------------------------------------------------------
+    # JSON TRAINING HISTORY
+    # --------------------------------------------------------
 
+    with open(
+        HISTORY_FILE + ".tmp",
+        "w",
+        encoding="utf-8"
+    ) as f:
 
-            print(
-                "\n"
-                + "=" * 70
-            )
+        json.dump(
+            history,
+            f,
+            indent=2
+        )
 
+    os.replace(
+        HISTORY_FILE + ".tmp",
+        HISTORY_FILE
+    )
 
-            print(
-                "EARLY STOPPING TRIGGERED"
-            )
+    elapsed = (
+        time.perf_counter() - wall_start
+    ) / 60
 
-
-            print(
-                "=" * 70
-            )
-
-
-            print(
-
-                "Geometry50 did not improve "
-                f"for "
-                f"{EARLY_STOPPING_PATIENCE} "
-                "consecutive epochs."
-            )
-
-
-            break
+    print(
+        "Saved last checkpoint; "
+        f"total Step30 elapsed: {elapsed:.2f} min"
+    )
 
 
 # ============================================================
-# FINAL STATUS
+# 12. FINAL STATUS
 # ============================================================
 
+assert len(history) == EPOCHS
+
+assert history[-1]["exposures_seen"] == 80000
+
 print(
-    "\n"
-    + "=" * 70
+    "\nSTEP 30 FINISHED: "
+    "10 epochs / 80,000 exposures / 10,000 updates"
 )
 
-
 print(
-    "FULL COCO-80 SOURCE TRAINING FINISHED"
-)
-
-
-print(
-    "FAST-REPRO V1"
-)
-
-
-print(
-    "=" * 70
-)
-
-
-print(
-    "Best Geometry50 :",
+    "Best Geometry50:",
     best_geometry
 )
 
-
 print(
-    "Best checkpoint :",
+    "Best checkpoint:",
     BEST_CHECKPOINT
 )
 
-
 print(
-    "Last checkpoint :",
+    "Last checkpoint:",
     LAST_CHECKPOINT
 )
 
-
 print(
-    "Forward dtype   : BF16"
-)
-
-
-print(
-    "Loss dtype      : FP32"
-)
-
-
-print(
-    "GradScaler      : OFF"
-)
-
-
-print(
-    "\nSTEP 30 PASSED"
+    "Manifest SHA256:",
+    source_manifest_sha256
 )
