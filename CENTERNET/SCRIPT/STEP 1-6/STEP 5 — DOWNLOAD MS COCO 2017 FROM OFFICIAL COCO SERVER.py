@@ -1,41 +1,66 @@
+
 # ============================================================
-# STEP 5 — DOWNLOAD MS COCO 2017 FROM OFFICIAL COCO SERVER
+# STEP 5 — DOWNLOAD & EXTRACT COCO 2017
 # ============================================================
 
-DATA_ROOT = CONFIG["data_root"]
-os.makedirs(DATA_ROOT, exist_ok=True)
+import os
+import subprocess
+import zipfile
 
-files = {
-    "train2017.zip":
-        "http://images.cocodataset.org/zips/train2017.zip",
+ROOT = CONFIG["data_root"]
+os.makedirs(ROOT, exist_ok=True)
 
-    "val2017.zip":
-        "http://images.cocodataset.org/zips/val2017.zip",
+datasets = [
+    ("train2017.zip",
+     "https://images.cocodataset.org/zips/train2017.zip",
+     "train2017", 118287),
 
-    "annotations_trainval2017.zip":
-        "http://images.cocodataset.org/annotations/annotations_trainval2017.zip",
-}
+    ("val2017.zip",
+     "https://images.cocodataset.org/zips/val2017.zip",
+     "val2017", 5000),
 
-for filename, url in files.items():
+    ("annotations_trainval2017.zip",
+     "https://images.cocodataset.org/annotations/annotations_trainval2017.zip",
+     "annotations", None),
+]
 
-    zip_path = os.path.join(DATA_ROOT, filename)
+def is_complete(folder, count):
+    path = os.path.join(ROOT, folder)
 
-    if not os.path.exists(zip_path):
-        print(f"\nDownloading {filename}...")
-        subprocess.run(
-            ["wget", "-c", url, "-O", zip_path],
-            check=True
-        )
-    else:
-        print(f"\n{filename} already downloaded.")
+    if count is None:
+        return all(os.path.isfile(CONFIG[k]) for k in
+                   ("train_annotations", "val_annotations"))
 
-    print(f"Extracting {filename}...")
+    return os.path.isdir(path) and sum(
+        f.name.endswith(".jpg") for f in os.scandir(path)
+    ) == count
 
-    with zipfile.ZipFile(zip_path, "r") as zip_ref:
-        zip_ref.extractall(DATA_ROOT)
+for filename, url, folder, count in datasets:
+    print(f"\n=== {filename} ===", flush=True)
 
-print("\n" + "=" * 60)
-print("COCO 2017 DOWNLOAD & EXTRACTION COMPLETE")
-print("=" * 60)
+    if is_complete(folder, count):
+        print("Already complete, skipping.")
+        continue
 
-print("Dataset root :", DATA_ROOT)
+    zip_path = os.path.join(ROOT, filename)
+
+    if not zipfile.is_zipfile(zip_path):
+        subprocess.run([
+            "wget", "-c", "--no-check-certificate",
+            "--show-progress", "-O", zip_path, url
+        ], check=True)
+
+    assert zipfile.is_zipfile(zip_path), f"Invalid ZIP: {filename}"
+
+    print("Extracting...", flush=True)
+    subprocess.run(
+        ["unzip", "-oq", zip_path, "-d", ROOT],
+        check=True
+    )
+
+    assert is_complete(folder, count), f"Incomplete: {folder}"
+
+    os.remove(zip_path)
+    print("DONE")
+
+print("\nSTEP 5 PASSED — COCO 2017 READY")
