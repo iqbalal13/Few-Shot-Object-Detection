@@ -1,9 +1,12 @@
+
 # ============================================================
 # STEP 15 — CENTERNET GAUSSIAN HEATMAP UTILITIES
+# OPTIMIZED: CACHE GAUSSIAN BY RADIUS
 # ============================================================
 
 import math
 import torch
+from functools import lru_cache
 
 print("=" * 70)
 print("STEP 15 — GAUSSIAN HEATMAP UTILITIES")
@@ -15,7 +18,6 @@ def gaussian_radius(
     width,
     min_overlap=0.7
 ):
-
     height = float(height)
     width = float(width)
 
@@ -34,7 +36,6 @@ def gaussian_radius(
     r1 = (
         b1 + sq1
     ) / 2
-
 
     a2 = 4
     b2 = 2 * (
@@ -55,7 +56,6 @@ def gaussian_radius(
         b2 + sq2
     ) / 2
 
-
     a3 = 4 * min_overlap
     b3 = -2 * min_overlap * (
         height + width
@@ -71,9 +71,7 @@ def gaussian_radius(
 
     r3 = (
         b3 + sq3
-    ) / (
-        2 * a3
-    )
+    ) / (2 * a3)
 
     return max(
         0.0,
@@ -85,7 +83,6 @@ def gaussian2d(
     shape,
     sigma=1.0
 ):
-
     height, width = shape
 
     y = torch.arange(
@@ -112,19 +109,31 @@ def gaussian2d(
     return gaussian
 
 
+@lru_cache(maxsize=256)
+def _gaussian_for_radius(radius):
+    """
+    Cache the source Gaussian tensor.
+
+    Only read slices from this tensor.
+    Never modify the cached Gaussian.
+    """
+    diameter = 2 * int(radius) + 1
+
+    return gaussian2d(
+        (diameter, diameter),
+        sigma=diameter / 6
+    )
+
+
 def draw_gaussian(
     heatmap,
     center,
     radius
 ):
+    diameter = 2 * radius + 1
 
-    diameter = (
-        2 * radius + 1
-    )
-
-    gaussian = gaussian2d(
-        (diameter, diameter),
-        sigma=diameter / 6
+    gaussian = _gaussian_for_radius(
+        int(radius)
     )
 
     x, y = (
@@ -184,7 +193,7 @@ def draw_gaussian(
     return heatmap
 
 
-# Sanity test
+# Original sanity test
 test_heatmap = torch.zeros(
     (160, 160),
     dtype=torch.float32
