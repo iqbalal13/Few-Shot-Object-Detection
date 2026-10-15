@@ -647,9 +647,8 @@ source_val_loader, source_val_generator = (
     )
 )
 
-assert len(full_train_loader) == (
-    STEPS_PER_EPOCH == 1000
-)
+assert STEPS_PER_EPOCH == 1000
+assert len(full_train_loader) == 1000
 
 assert len(source_val_loader) == math.ceil(
     5000 / CONFIG["batch_size"]
