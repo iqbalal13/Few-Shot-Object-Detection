@@ -1,3 +1,4 @@
+
 # ============================================================
 # STEP 24 — CENTERNET LOSS (NUMERICALLY STABLE FOR AMP)
 # ============================================================
@@ -15,73 +16,42 @@ CONFIG["wh_loss_weight"] = 0.1
 CONFIG["offset_loss_weight"] = 1.0
 
 
-def centernet_focal_loss(
-    prediction_logits,
-    target
-):
+def centernet_focal_loss(prediction_logits, target):
     """
-    Numerically stable CenterNet focal loss.
-
-    Forward model boleh AMP/FP16,
-    tetapi seluruh perhitungan focal loss
-    dipaksa FP32.
+    CenterNet focal loss in FP32.
+    Eliminates the per-batch num_positive.item() sync.
     """
-
     device_type = prediction_logits.device.type
 
     with torch.amp.autocast(
         device_type=device_type,
         enabled=False
     ):
-
         logits = prediction_logits.float()
         target = target.float()
 
-        probability = torch.sigmoid(
-            logits
-        )
+        probability = torch.sigmoid(logits)
 
-        positive_mask = target.eq(
-            1.0
-        ).float()
-
-        negative_mask = target.lt(
-            1.0
-        ).float()
+        positive_mask = target.eq(1.0).float()
+        negative_mask = target.lt(1.0).float()
 
         negative_weights = torch.pow(
             1.0 - target,
             4
         )
 
-        # Stable:
-        # log(sigmoid(x))
-        positive_log_prob = F.logsigmoid(
-            logits
-        )
-
-        # Stable:
-        # log(1 - sigmoid(x))
-        # = log(sigmoid(-x))
-        negative_log_prob = F.logsigmoid(
-            -logits
-        )
+        positive_log_prob = F.logsigmoid(logits)
+        negative_log_prob = F.logsigmoid(-logits)
 
         positive_loss = (
             positive_log_prob
-            * torch.pow(
-                1.0 - probability,
-                2
-            )
+            * torch.pow(1.0 - probability, 2)
             * positive_mask
         )
 
         negative_loss = (
             negative_log_prob
-            * torch.pow(
-                probability,
-                2
-            )
+            * torch.pow(probability, 2)
             * negative_weights
             * negative_mask
         )
@@ -91,43 +61,27 @@ def centernet_focal_loss(
         positive_loss = positive_loss.sum()
         negative_loss = negative_loss.sum()
 
-        if num_positive.item() > 0:
-
-            loss = -(
-                positive_loss
-                + negative_loss
-            ) / num_positive
-
-        else:
-
-            loss = -negative_loss
+        loss = torch.where(
+            num_positive > 0,
+            -(positive_loss + negative_loss)
+            / num_positive.clamp_min(1.0),
+            -negative_loss
+        )
 
     return loss
 
 
-def transpose_and_gather_feature(
-    feature,
-    indices
-):
+def transpose_and_gather_feature(feature, indices):
     """
-    feature:
-        [B, C, H, W]
+    feature: [B, C, H, W]
+    indices: [B, max_objects]
 
-    indices:
-        [B, max_objects]
-
-    return:
-        [B, max_objects, C]
+    Returns: [B, max_objects, C]
     """
-
-    batch, channels, height, width = \
-        feature.shape
+    batch, channels, height, width = feature.shape
 
     feature = feature.permute(
-        0,
-        2,
-        3,
-        1
+        0, 2, 3, 1
     ).contiguous()
 
     feature = feature.view(
@@ -136,44 +90,29 @@ def transpose_and_gather_feature(
         channels
     )
 
-    indices = indices.unsqueeze(
-        -1
-    ).expand(
+    indices = indices.unsqueeze(-1).expand(
         -1,
         -1,
         channels
     )
 
-    gathered = feature.gather(
-        1,
-        indices
-    )
-
-    return gathered
+    return feature.gather(1, indices)
 
 
-def masked_l1_loss(
-    prediction,
-    target,
-    mask
-):
+def masked_l1_loss(prediction, target, mask):
     """
     Masked L1 loss in FP32.
     """
-
     device_type = prediction.device.type
 
     with torch.amp.autocast(
         device_type=device_type,
         enabled=False
     ):
-
         prediction = prediction.float()
         target = target.float()
 
-        mask = mask.unsqueeze(
-            -1
-        ).expand_as(
+        mask = mask.unsqueeze(-1).expand_as(
             prediction
         ).float()
 
@@ -183,65 +122,44 @@ def masked_l1_loss(
             reduction="sum"
         )
 
-        denominator = (
-            mask.sum()
-            + 1e-4
-        )
+        denominator = mask.sum() + 1e-4
 
-        loss = (
-            loss
-            / denominator
-        )
+        loss = loss / denominator
 
     return loss
 
 
-def build_batch_centernet_targets(
-    targets,
-    device
-):
+def build_batch_centernet_targets(targets, device):
+    """
+    Legacy target builder.
 
+    Used by sanity checks and fallback training.
+    Step 30 uses pre-encoded DataLoader targets.
+    """
     encoded = [
-        build_centernet_target(
-            target
-        )
+        build_centernet_target(target)
         for target in targets
     ]
 
-    heatmap = torch.stack(
-        [
-            item["heatmap"]
-            for item in encoded
-        ]
-    ).to(device)
+    heatmap = torch.stack([
+        item["heatmap"] for item in encoded
+    ]).to(device, non_blocking=True)
 
-    wh = torch.stack(
-        [
-            item["wh"]
-            for item in encoded
-        ]
-    ).to(device)
+    wh = torch.stack([
+        item["wh"] for item in encoded
+    ]).to(device, non_blocking=True)
 
-    offset = torch.stack(
-        [
-            item["offset"]
-            for item in encoded
-        ]
-    ).to(device)
+    offset = torch.stack([
+        item["offset"] for item in encoded
+    ]).to(device, non_blocking=True)
 
-    indices = torch.stack(
-        [
-            item["indices"]
-            for item in encoded
-        ]
-    ).to(device)
+    indices = torch.stack([
+        item["indices"] for item in encoded
+    ]).to(device, non_blocking=True)
 
-    mask = torch.stack(
-        [
-            item["mask"]
-            for item in encoded
-        ]
-    ).to(device)
+    mask = torch.stack([
+        item["mask"] for item in encoded
+    ]).to(device, non_blocking=True)
 
     return {
         "heatmap": heatmap,
@@ -266,28 +184,22 @@ class CenterNetLoss(nn.Module):
         self.wh_weight = wh_weight
         self.offset_weight = offset_weight
 
-    def forward(
-        self,
-        outputs,
-        targets
-    ):
+    def forward(self, outputs, targets):
 
         heatmap_loss = centernet_focal_loss(
             outputs["heatmap"],
             targets["heatmap"]
         )
 
-        predicted_wh = \
-            transpose_and_gather_feature(
-                outputs["wh"],
-                targets["indices"]
-            )
+        predicted_wh = transpose_and_gather_feature(
+            outputs["wh"],
+            targets["indices"]
+        )
 
-        predicted_offset = \
-            transpose_and_gather_feature(
-                outputs["offset"],
-                targets["indices"]
-            )
+        predicted_offset = transpose_and_gather_feature(
+            outputs["offset"],
+            targets["indices"]
+        )
 
         wh_loss = masked_l1_loss(
             predicted_wh,
@@ -302,65 +214,29 @@ class CenterNetLoss(nn.Module):
         )
 
         total_loss = (
-            self.hm_weight
-            * heatmap_loss
-
-            + self.wh_weight
-            * wh_loss
-
-            + self.offset_weight
-            * offset_loss
+            self.hm_weight * heatmap_loss
+            + self.wh_weight * wh_loss
+            + self.offset_weight * offset_loss
         )
 
         return {
-            "loss_total":
-                total_loss,
-
-            "loss_heatmap":
-                heatmap_loss,
-
-            "loss_wh":
-                wh_loss,
-
-            "loss_offset":
-                offset_loss
+            "loss_total": total_loss,
+            "loss_heatmap": heatmap_loss,
+            "loss_wh": wh_loss,
+            "loss_offset": offset_loss
         }
 
 
 criterion = CenterNetLoss(
-    hm_weight=CONFIG[
-        "hm_loss_weight"
-    ],
-    wh_weight=CONFIG[
-        "wh_loss_weight"
-    ],
-    offset_weight=CONFIG[
-        "offset_loss_weight"
-    ]
+    hm_weight=CONFIG["hm_loss_weight"],
+    wh_weight=CONFIG["wh_loss_weight"],
+    offset_weight=CONFIG["offset_loss_weight"]
 ).to(device)
 
 
-print(
-    "Heatmap loss weight :",
-    CONFIG["hm_loss_weight"]
-)
-
-print(
-    "WH loss weight      :",
-    CONFIG["wh_loss_weight"]
-)
-
-print(
-    "Offset loss weight  :",
-    CONFIG["offset_loss_weight"]
-)
-
-print(
-    "Loss math precision : FP32"
-)
-
-print(
-    "Model forward AMP   : still allowed"
-)
+print("Heatmap loss weight :", CONFIG["hm_loss_weight"])
+print("WH loss weight      :", CONFIG["wh_loss_weight"])
+print("Offset loss weight  :", CONFIG["offset_loss_weight"])
+print("Loss math precision : FP32")
 
 print("\nSTEP 24 PASSED")
