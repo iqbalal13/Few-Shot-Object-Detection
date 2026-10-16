@@ -1,14 +1,14 @@
 
 # ============================================================
 # STEP 4 — GLOBAL CONFIGURATION
-# BALANCED80K V1.2 — LOCKED
+# BALANCED80K V1.3 — LOCKED
 # ============================================================
 
 import os
 
 CONFIG = {
     # Experiment identity
-    "experiment_name": "CenterNet_COCO80_FSOD_BALANCED80K_V1_2_BS8",
+    "experiment_name": "CenterNet_COCO80_FSOD_BALANCED80K_V1_3_AUG_GAUSS_BS8",
 
     # Model
     "backbone": "resnet101",
@@ -32,6 +32,9 @@ CONFIG = {
     "source_images_total": 80000,
     "source_images_per_epoch": 8000,
     "source_images_per_class_per_epoch": 100,
+    "train_horizontal_flip_p": 0.5,
+    "gaussian_radius_mode": "quadratic_small_root",
+    "best_checkpoint_metric": "official_COCO_AP50",
     "source_sampling_policy": "class-balanced-multiclass",
     "source_manifest_seed_offset": 3000,
 
@@ -90,54 +93,4 @@ CONFIG["val_annotations"] = os.path.join(
 )
 
 print("=" * 70)
-print("CENTERNET GLOBAL CONFIG — BALANCED80K V1.2")
-print("=" * 70)
-
-for key, value in CONFIG.items():
-    print(f"{key:26s}: {value}")
-
-# Original invariants
-assert CONFIG["backbone"] == "resnet101"
-assert CONFIG["num_classes"] == 80
-assert CONFIG["input_size"] == 640
-assert CONFIG["output_stride"] == 4
-assert CONFIG["batch_size"] == 8
-assert CONFIG["num_workers"] == 8
-assert CONFIG["persistent_workers"] is True
-assert CONFIG["prefetch_factor"] == 4
-assert CONFIG["learning_rate"] == 1e-4
-assert CONFIG["weight_decay"] == 1e-4
-assert CONFIG["precision"] == "bfloat16"
-assert CONFIG["grad_clip_norm"] == 10.0
-assert CONFIG["score_threshold"] == 0.50
-assert CONFIG["iou_threshold"] == 0.50
-assert CONFIG["seed"] == 42
-
-# Balanced80K invariants
-assert CONFIG["source_epochs"] == 10
-assert CONFIG["source_images_per_epoch"] == 8000
-assert CONFIG["source_images_total"] == 80000
-assert CONFIG["source_images_per_class_per_epoch"] == 100
-
-assert (
-    CONFIG["source_epochs"]
-    * CONFIG["source_images_per_epoch"]
-    == CONFIG["source_images_total"]
-)
-
-assert (
-    CONFIG["source_images_per_class_per_epoch"]
-    * CONFIG["num_classes"]
-    == CONFIG["source_images_per_epoch"]
-)
-
-assert (
-    CONFIG["source_images_per_epoch"]
-    % CONFIG["batch_size"] == 0
-)
-
-assert CONFIG["use_fused_adamw"] is False
-assert CONFIG["use_channels_last"] is False
-
-print("BALANCED80K V1.2 CONFIG LOCKED")
-print("STEP 4 PASSED")
+print("CENTERNET GLOBAL CONFIG — BALANCED80K V1.3")
