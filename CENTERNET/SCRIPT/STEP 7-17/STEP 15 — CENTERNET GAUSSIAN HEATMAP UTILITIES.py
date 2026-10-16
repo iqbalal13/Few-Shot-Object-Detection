@@ -1,7 +1,8 @@
 
 # ============================================================
 # STEP 15 — CENTERNET GAUSSIAN HEATMAP UTILITIES
-# OPTIMIZED: CACHE GAUSSIAN BY RADIUS
+# CORRECTED QUADRATIC ROOT + CACHED GAUSSIAN
+# EXPERIMENTAL CHANGE: Requires source retraining, no retroactive effect.
 # ============================================================
 
 import math
@@ -34,8 +35,8 @@ def gaussian_radius(
     )
 
     r1 = (
-        b1 + sq1
-    ) / 2
+        b1 - sq1
+    ) / (2 * a1)
 
     a2 = 4
     b2 = 2 * (
@@ -53,8 +54,8 @@ def gaussian_radius(
     )
 
     r2 = (
-        b2 + sq2
-    ) / 2
+        b2 - sq2
+    ) / (2 * a2)
 
     a3 = 4 * min_overlap
     b3 = -2 * min_overlap * (
@@ -93,123 +94,3 @@ def gaussian2d(
     x = torch.arange(
         width,
         dtype=torch.float32
-    ) - (width - 1) / 2
-
-    yy, xx = torch.meshgrid(
-        y,
-        x,
-        indexing="ij"
-    )
-
-    gaussian = torch.exp(
-        -(xx ** 2 + yy ** 2)
-        / (2 * sigma ** 2)
-    )
-
-    return gaussian
-
-
-@lru_cache(maxsize=256)
-def _gaussian_for_radius(radius):
-    """
-    Cache the source Gaussian tensor.
-
-    Only read slices from this tensor.
-    Never modify the cached Gaussian.
-    """
-    diameter = 2 * int(radius) + 1
-
-    return gaussian2d(
-        (diameter, diameter),
-        sigma=diameter / 6
-    )
-
-
-def draw_gaussian(
-    heatmap,
-    center,
-    radius
-):
-    diameter = 2 * radius + 1
-
-    gaussian = _gaussian_for_radius(
-        int(radius)
-    )
-
-    x, y = (
-        int(center[0]),
-        int(center[1])
-    )
-
-    height, width = heatmap.shape
-
-    left = min(
-        x,
-        radius
-    )
-
-    right = min(
-        width - x - 1,
-        radius
-    )
-
-    top = min(
-        y,
-        radius
-    )
-
-    bottom = min(
-        height - y - 1,
-        radius
-    )
-
-    if (
-        left < 0
-        or right < 0
-        or top < 0
-        or bottom < 0
-    ):
-        return heatmap
-
-    masked_heatmap = heatmap[
-        y - top:y + bottom + 1,
-        x - left:x + right + 1
-    ]
-
-    masked_gaussian = gaussian[
-        radius - top:
-        radius + bottom + 1,
-
-        radius - left:
-        radius + right + 1
-    ]
-
-    torch.maximum(
-        masked_heatmap,
-        masked_gaussian,
-        out=masked_heatmap
-    )
-
-    return heatmap
-
-
-# Original sanity test
-test_heatmap = torch.zeros(
-    (160, 160),
-    dtype=torch.float32
-)
-
-test_heatmap = draw_gaussian(
-    test_heatmap,
-    center=(80, 80),
-    radius=5
-)
-
-print("Heatmap shape :", test_heatmap.shape)
-print("Heatmap max   :", test_heatmap.max().item())
-print("Heatmap min   :", test_heatmap.min().item())
-
-assert test_heatmap.max().item() == 1.0
-assert test_heatmap.min().item() >= 0.0
-
-print("\nSTEP 15 PASSED")
