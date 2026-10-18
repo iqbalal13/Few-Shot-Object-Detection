@@ -1,555 +1,523 @@
 
-# ============================================================
-# STEP 33 — OFFICIAL COCO mAP / IoU EVALUATION
-# ALL 80 CLASSES — BALANCED80K V1.3
-# NO TRAINING — NO WEIGHT UPDATES
-# ============================================================
+# ================================================================
+# STEP 33 — OFFICIAL COCO BBOX EVALUATION (ALL 80 CLASSES)
+# Balanced80K V1.3 — 5000 val images, zero extra training
+# AP50 / AP75 / AP95 / AP@0.50:0.95 / AR + saved JSON
+# ================================================================
 
 import os
 import json
-import time
 import math
+import time
+import contextlib
+import io
 import numpy as np
 import torch
-
-from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 
-print("=" * 72)
-print("STEP 33 — OFFICIAL COCO BBOX mAP / IoU")
-print("=" * 72)
+print('=' * 72)
+print('STEP 33 — OFFICIAL COCO BBOX mAP / IoU — ALL 80 CLASSES')
+print('=' * 72)
 
-# ============================================================
-# 1. CHECK CONFIGURATION AND CHECKPOINT
-# ============================================================
+# ================================================================
+# 1. EXPERIMENT AND CHECKPOINT IDENTITY
+# ================================================================
 
-assert CONFIG["experiment_name"] == (
-    "CenterNet_COCO80_FSOD_BALANCED80K_V1_3_AUG_GAUSS_BS8"
+assert CONFIG['experiment_name'] == (
+    'CenterNet_COCO80_FSOD_BALANCED80K_V1_3_AUG_GAUSS_BS8'
 )
 
-assert CONFIG["num_classes"] == 80
+assert CONFIG['num_classes'] == 80
 assert len(val_dataset) == 5000
-assert len(val_dataset.cat_ids) == 80
-assert torch.cuda.is_available()
-assert os.path.isfile(BEST_CHECKPOINT)
 
-coco33_ckpt = torch.load(
+assert not val_dataset.augment, (
+    'Validation must have NO random augmentation.'
+)
+
+assert os.path.isfile(BEST_CHECKPOINT), (
+    'Step 30 best checkpoint missing.'
+)
+
+ckpt33 = torch.load(
     BEST_CHECKPOINT,
-    map_location="cpu",
+    map_location='cpu',
     weights_only=False
 )
 
-assert coco33_ckpt["experiment_name"] == (
-    CONFIG["experiment_name"]
-)
+assert ckpt33['experiment_name'] == CONFIG['experiment_name']
+assert ckpt33['source_images_total'] == 80000
+assert 1 <= int(ckpt33['epoch']) <= 10
 
-assert coco33_ckpt["source_images_total"] == 80000
-
-if "source_manifest_sha256" in globals():
+if 'source_manifest_sha256' in globals():
     assert (
-        coco33_ckpt["source_manifest_sha256"]
+        ckpt33['source_manifest_sha256']
         == source_manifest_sha256
     )
 
-coco33_epoch = int(coco33_ckpt["epoch"])
+stored_stats33 = ckpt33.get('val_stats', {})
 
-# Always reload the saved best model
-coco33_model = CenterNetResNet101(
-    num_classes=80,
+print('Best checkpoint epoch:', int(ckpt33['epoch']))
+print('Stored official mAP  :', stored_stats33.get('official_map'))
+print('Stored official AP50 :', stored_stats33.get('official_ap50'))
+print('Stored official AP75 :', stored_stats33.get('official_ap75'))
+
+# ================================================================
+# 2. RELOAD BEST CENTERNET MODEL
+# ================================================================
+
+model33 = CenterNetResNet101(
+    num_classes=CONFIG['num_classes'],
     pretrained_backbone=False
 ).to(device)
 
-coco33_model.load_state_dict(
-    coco33_ckpt["model_state_dict"],
+model33.load_state_dict(
+    ckpt33['model_state_dict'],
     strict=True
 )
 
-coco33_model.eval()
+model33.eval()
 
-del coco33_ckpt
+ckpt33_epoch = int(ckpt33['epoch'])
 
-# Use original COCO annotations, not letterboxed GT
-coco33_gt = val_dataset.coco
+del ckpt33
 
-coco33_label_to_catid = tuple(
-    int(x) for x in val_dataset.cat_ids
-)
+# ================================================================
+# 3. FULL COCO VALIDATION CONFIGURATION
+# ================================================================
 
-coco33_image_ids = list(
+img_ids33 = set(
     map(int, val_dataset.image_ids)
 )
 
-assert set(coco33_gt.getImgIds()) == set(
-    coco33_image_ids
+cat_ids33 = list(
+    map(int, val_dataset.cat_ids)
 )
 
-# ============================================================
-# 2. EVALUATION CONFIGURATION
-# ============================================================
+assert len(img_ids33) == 5000
+assert len(cat_ids33) == 80
 
 COCO33_TOPK = 100
-
-# Important: do not use confidence 0.50 for AP.
-# AP evaluates the ranking across confidence scores.
 COCO33_MIN_SCORE = 0.0
 
-COCO33_SAVE_PREDICTIONS = True
+preds33 = []
+seen33 = set()
 
-COCO33_SAVE_DIR = (
-    FULL_CHECKPOINT_DIR
-    if "FULL_CHECKPOINT_DIR" in globals()
-    else CONFIG["checkpoint_root"]
-)
+t_start33 = time.perf_counter()
 
-os.makedirs(
-    COCO33_SAVE_DIR,
-    exist_ok=True
-)
-
-# ============================================================
-# 3. CONVERT PREDICTIONS TO ORIGINAL COCO COORDINATES
-# ============================================================
-
-def coco33_convert_predictions(prediction, target):
-
-    image_id = int(
-        target["image_id"].item()
-    )
-
-    orig_h, orig_w = [
-        int(x)
-        for x in target["original_size"].tolist()
-    ]
-
-    pad_x, pad_y = [
-        float(x)
-        for x in target["pad"].tolist()
-    ]
-
-    scale = float(
-        target["scale"].item()
-    )
-
-    assert scale > 0
-    assert math.isfinite(scale)
-
-    boxes = (
-        prediction["boxes"]
-        .detach()
-        .float()
-        .cpu()
-        .numpy()
-        .copy()
-    )
-
-    scores = (
-        prediction["scores"]
-        .detach()
-        .float()
-        .cpu()
-        .numpy()
-    )
-
-    labels = (
-        prediction["labels"]
-        .detach()
-        .long()
-        .cpu()
-        .numpy()
-    )
-
-    if boxes.size == 0:
-        return []
-
-    # Undo 640x640 letterbox preprocessing
-    boxes[:, [0, 2]] = (
-        boxes[:, [0, 2]] - pad_x
-    ) / scale
-
-    boxes[:, [1, 3]] = (
-        boxes[:, [1, 3]] - pad_y
-    ) / scale
-
-    boxes[:, [0, 2]] = np.clip(
-        boxes[:, [0, 2]],
-        0,
-        orig_w
-    )
-
-    boxes[:, [1, 3]] = np.clip(
-        boxes[:, [1, 3]],
-        0,
-        orig_h
-    )
-
-    records = []
-
-    for box, score, label in zip(
-        boxes, scores, labels
-    ):
-
-        label = int(label)
-
-        assert 0 <= label < 80
-
-        if not (
-            np.isfinite(box).all()
-            and math.isfinite(float(score))
-        ):
-            continue
-
-        x1, y1, x2, y2 = map(float, box)
-
-        w = x2 - x1
-        h = y2 - y1
-
-        if w <= 0 or h <= 0:
-            continue
-
-        if float(score) < COCO33_MIN_SCORE:
-            continue
-
-        records.append({
-            "image_id": image_id,
-            "category_id": coco33_label_to_catid[label],
-            "bbox": [x1, y1, w, h],
-            "score": float(score)
-        })
-
-    return records
-
-
-# ============================================================
-# 4. FULL COCO-VAL INFERENCE
-# ============================================================
-
-coco33_predictions = []
-coco33_seen_ids = []
-
-start_time = time.perf_counter()
+# ================================================================
+# 4. INFERENCE ON ALL 5000 COCO-VAL IMAGES
+# ================================================================
 
 with torch.inference_mode():
 
-    for batch_index, batch in enumerate(
-        val_loader,
+    for batch_num33, batch33 in enumerate(
+        source_val_loader,
         start=1
     ):
 
-        images, targets = batch[0], batch[1]
+        # Encoded DataLoader:
+        # (images, raw_targets, encoded_targets)
 
-        images = images.to(
+        images33, targets33 = batch33[0], batch33[1]
+
+        images33 = images33.to(
             device,
             non_blocking=True
         )
 
         with torch.amp.autocast(
-            device_type="cuda",
+            device_type='cuda',
             dtype=torch.bfloat16
         ):
+            outputs33 = model33(images33)
 
-            outputs = coco33_model(images)
-
-        decode_outputs = {
-            name: tensor.float()
-            for name, tensor in outputs.items()
-        }
-
-        predictions = decode_centernet(
-            decode_outputs,
+        # Decoder receives FP32 tensors.
+        decoded33 = decode_centernet(
+            {
+                key: value.float()
+                for key, value in outputs33.items()
+            },
             K=COCO33_TOPK,
             score_threshold=COCO33_MIN_SCORE
         )
 
-        assert len(predictions) == len(targets)
+        assert len(decoded33) == len(targets33)
 
-        for prediction, target in zip(
-            predictions,
-            targets
+        # ========================================================
+        # 5. RESTORE ORIGINAL COCO IMAGE COORDINATES
+        # ========================================================
+
+        for pred33, target33 in zip(
+            decoded33,
+            targets33
         ):
 
-            image_id = int(
-                target["image_id"].item()
+            image_id33 = int(
+                target33['image_id'].item()
             )
 
-            coco33_seen_ids.append(image_id)
+            assert image_id33 in img_ids33
 
-            coco33_predictions.extend(
-                coco33_convert_predictions(
-                    prediction,
-                    target
+            assert image_id33 not in seen33, (
+                f'Duplicate image ID {image_id33}'
+            )
+
+            seen33.add(image_id33)
+
+            original_h33, original_w33 = map(
+                int,
+                target33['original_size'].tolist()
+            )
+
+            pad_x33, pad_y33 = map(
+                float,
+                target33['pad'].tolist()
+            )
+
+            scale33 = float(
+                target33['scale'].item()
+            )
+
+            assert math.isfinite(scale33)
+            assert scale33 > 0
+
+            boxes33 = (
+                pred33['boxes']
+                .detach()
+                .cpu()
+                .float()
+                .clone()
+            )
+
+            scores33 = (
+                pred33['scores']
+                .detach()
+                .cpu()
+                .float()
+            )
+
+            labels33 = (
+                pred33['labels']
+                .detach()
+                .cpu()
+                .long()
+            )
+
+            # Undo letterbox padding and resize scale.
+            boxes33[:, [0, 2]] = (
+                (
+                    boxes33[:, [0, 2]] - pad_x33
+                ) / scale33
+            ).clamp(0, original_w33)
+
+            boxes33[:, [1, 3]] = (
+                (
+                    boxes33[:, [1, 3]] - pad_y33
+                ) / scale33
+            ).clamp(0, original_h33)
+
+            # ====================================================
+            # 6. CONVERT XYXY TO COCO XYWH
+            # ====================================================
+
+            for bbox33, score33, label33 in zip(
+                boxes33.tolist(),
+                scores33.tolist(),
+                labels33.tolist()
+            ):
+
+                x1, y1, x2, y2 = map(
+                    float,
+                    bbox33
                 )
-            )
 
-        if batch_index == 1 or batch_index % 100 == 0:
+                score33 = float(score33)
+                label33 = int(label33)
 
+                if not (
+                    0 <= label33 < 80
+                    and math.isfinite(score33)
+                    and all(
+                        math.isfinite(x)
+                        for x in (x1, y1, x2, y2)
+                    )
+                ):
+                    continue
+
+                if x2 <= x1 or y2 <= y1:
+                    continue
+
+                preds33.append({
+                    'image_id': image_id33,
+                    'category_id': cat_ids33[label33],
+                    'bbox': [
+                        x1,
+                        y1,
+                        x2 - x1,
+                        y2 - y1
+                    ],
+                    'score': score33
+                })
+
+        if (
+            batch_num33 == 1
+            or batch_num33 % 100 == 0
+        ):
             print(
-                f"Processed {len(coco33_seen_ids)}/5000 "
-                f"| detections={len(coco33_predictions)}"
+                f'Processed {len(seen33)}/5000 images; '
+                f'{len(preds33)} valid detections'
             )
+
+# ================================================================
+# 7. INFERENCE VALIDATION
+# ================================================================
+
+assert seen33 == img_ids33, (
+    'Validation image coverage incomplete.'
+)
+
+assert preds33, (
+    'No detections generated.'
+)
 
 torch.cuda.synchronize()
 
-inference_seconds = (
-    time.perf_counter() - start_time
-)
-
-assert len(coco33_seen_ids) == 5000
-
-assert len(set(coco33_seen_ids)) == 5000
-
-assert set(coco33_seen_ids) == set(
-    coco33_image_ids
+t_seconds33 = (
+    time.perf_counter() - t_start33
 )
 
 print(
-    "Total valid detections:",
-    len(coco33_predictions)
+    f'Inference and decoding completed in '
+    f'{t_seconds33 / 60:.2f} minutes'
 )
 
-# ============================================================
-# 5. OFFICIAL COCO EVALUATION
-# ============================================================
-
-if coco33_predictions:
-
-    coco33_dt = coco33_gt.loadRes(
-        coco33_predictions
-    )
-
-else:
-
-    # Handle empty detection list safely
-    coco33_dt = COCO()
-
-    coco33_dt.dataset = {
-        "images": list(coco33_gt.dataset["images"]),
-        "categories": list(coco33_gt.dataset["categories"]),
-        "annotations": []
-    }
-
-    coco33_dt.createIndex()
-
-coco33_eval = COCOeval(
-    coco33_gt,
-    coco33_dt,
-    iouType="bbox"
+print(
+    'Total valid detections:',
+    len(preds33)
 )
 
-coco33_eval.params.imgIds = sorted(
-    coco33_image_ids
+# ================================================================
+# 8. OFFICIAL COCO EVALUATION
+# ================================================================
+
+gt33 = val_dataset.coco
+
+dt33 = gt33.loadRes(
+    preds33
 )
 
-coco33_eval.params.catIds = sorted(
-    coco33_label_to_catid
+eval33 = COCOeval(
+    gt33,
+    dt33,
+    iouType='bbox'
 )
 
-coco33_eval.params.iouThrs = np.linspace(
+eval33.params.imgIds = sorted(
+    img_ids33
+)
+
+eval33.params.catIds = sorted(
+    cat_ids33
+)
+
+eval33.params.iouThrs = np.linspace(
     0.50,
     0.95,
     10
 )
 
-coco33_eval.params.maxDets = [
-    1, 10, 100
+eval33.params.maxDets = [
+    1,
+    10,
+    100
 ]
 
-print("\nRunning official COCOeval...")
+print('\nRunning official COCOeval...')
 
-coco33_eval.evaluate()
-coco33_eval.accumulate()
-coco33_eval.summarize()
+eval33.evaluate()
+eval33.accumulate()
+eval33.summarize()
 
-# ============================================================
-# 6. COMPUTE AP FOR EACH IoU — INCLUDING AP95
-# ============================================================
+# ================================================================
+# 9. AP AT EACH IoU THRESHOLD
+# ================================================================
 
-# Precision tensor shape:
-# [IoU, Recall, Categories, Area, MaxDets]
+# Precision tensor:
+# [IoU, Recall, Category, Area, MaxDets]
 
-precision_tensor = coco33_eval.eval["precision"]
+precision33 = eval33.eval['precision']
 
-assert precision_tensor.shape[2] == 80
+assert precision33.shape[2] == 80
 
-area_all_index = (
-    coco33_eval.params.areaRngLbl.index("all")
+area_idx33 = (
+    eval33.params.areaRngLbl.index('all')
 )
 
-maxdet100_index = (
-    coco33_eval.params.maxDets.index(100)
+maxdet_idx33 = (
+    eval33.params.maxDets.index(100)
 )
 
-def coco33_ap_for_iou(iou_index):
+AP_iou33 = {}
 
-    values = precision_tensor[
-        iou_index,
+for i33, threshold33 in enumerate(
+    eval33.params.iouThrs
+):
+
+    vals33 = precision33[
+        i33,
         :,
         :,
-        area_all_index,
-        maxdet100_index
+        area_idx33,
+        maxdet_idx33
     ]
 
-    # COCOeval uses -1 for unavailable values
-    valid = values[values > -1]
+    # -1 means unavailable in COCOeval.
+    available33 = vals33[
+        vals33 > -1
+    ]
 
-    if valid.size == 0:
-        return float("nan")
+    assert available33.size > 0
 
-    return float(valid.mean())
-
-
-ap_per_iou = {}
-
-for index, iou in enumerate(
-    coco33_eval.params.iouThrs
-):
-
-    ap_per_iou[f"{float(iou):.2f}"] = (
-        coco33_ap_for_iou(index)
+    AP_iou33[
+        f'{threshold33:.2f}'
+    ] = float(
+        available33.mean()
     )
 
-stats = coco33_eval.stats
+# ================================================================
+# 10. COLLECT ALL OFFICIAL METRICS
+# ================================================================
 
-coco33_metrics = {
-    "mAP_50_95": float(stats[0]),
-    "AP50": float(stats[1]),
-    "AP75": float(stats[2]),
-    "AP95": ap_per_iou["0.95"],
-    "AP_small": float(stats[3]),
-    "AP_medium": float(stats[4]),
-    "AP_large": float(stats[5]),
-    "AR_1": float(stats[6]),
-    "AR_10": float(stats[7]),
-    "AR_100": float(stats[8]),
-    "AR_small": float(stats[9]),
-    "AR_medium": float(stats[10]),
-    "AR_large": float(stats[11])
+metrics33 = {
+    'mAP_50_95': float(eval33.stats[0]),
+    'AP50': float(eval33.stats[1]),
+    'AP75': float(eval33.stats[2]),
+
+    # COCOeval does not report AP95 directly
+    # in its standard summary.
+    'AP95': AP_iou33['0.95'],
+
+    'AP_small': float(eval33.stats[3]),
+    'AP_medium': float(eval33.stats[4]),
+    'AP_large': float(eval33.stats[5]),
+
+    'AR1': float(eval33.stats[6]),
+    'AR10': float(eval33.stats[7]),
+    'AR100': float(eval33.stats[8])
 }
 
-# ============================================================
-# 7. FINAL RESULTS — ALL 80 CLASSES COMBINED
-# ============================================================
+# ================================================================
+# 11. CROSS-CHECK AP50 AGAINST STEP 30
+# ================================================================
 
-print("\n" + "=" * 72)
-print("CENTERNET BALANCED80K — OFFICIAL COCO RESULTS")
-print("ALL 80 CLASSES — NO PER-CLASS BREAKDOWN")
-print("=" * 72)
-
-for key in (
-    "mAP_50_95",
-    "AP50",
-    "AP75",
-    "AP95"
-):
-
-    value = coco33_metrics[key]
-
-    print(
-        f"{key:14s}: {value:.5f} "
-        f"({value * 100:.2f}%)"
-    )
-
-print("\nAP at each IoU threshold:")
-
-for iou, ap in ap_per_iou.items():
-
-    print(
-        f"IoU={iou}: {ap * 100:.3f}%"
-    )
-
-print("\nAdditional COCO metrics:")
-
-for key in (
-    "AP_small",
-    "AP_medium",
-    "AP_large",
-    "AR_1",
-    "AR_10",
-    "AR_100",
-    "AR_small",
-    "AR_medium",
-    "AR_large"
-):
-
-    value = coco33_metrics[key]
-
-    print(
-        f"{key:14s}: {value:.5f} "
-        f"({value * 100:.2f}%)"
-    )
-
-print(
-    f"\nInference + decoding: "
-    f"{inference_seconds / 60:.2f} minutes"
+expected33 = stored_stats33.get(
+    'official_ap50'
 )
 
-# ============================================================
-# 8. SAVE RESULTS
-# ============================================================
+if expected33 is not None:
 
-summary = {
-    "experiment_name": CONFIG["experiment_name"],
-    "checkpoint_epoch": coco33_epoch,
-    "checkpoint_path": BEST_CHECKPOINT,
-    "dataset": "COCO 2017 val",
-    "evaluation": "pycocotools.COCOeval bbox",
-    "num_images": 5000,
-    "num_classes": 80,
-    "num_detections": len(coco33_predictions),
-    "decoder_topk": COCO33_TOPK,
-    "decoder_score_threshold": COCO33_MIN_SCORE,
-    "inference_seconds": inference_seconds,
-    "metrics": coco33_metrics,
-    "ap_per_iou": ap_per_iou
+    absolute_difference33 = abs(
+        metrics33['AP50'] - float(expected33)
+    )
+
+    print(
+        '\nAP50 vs Step 30 absolute difference:',
+        absolute_difference33
+    )
+
+    assert absolute_difference33 < 0.001, (
+        'AP50 disagrees with Step 30; '
+        'verify checkpoint, preprocessing and decoding.'
+    )
+
+# ================================================================
+# 12. PRINT FINAL RESULTS — ALL 80 CLASSES
+# ================================================================
+
+print('\n' + '=' * 72)
+print('OFFICIAL COCO RESULTS — BALANCED80K V1.3')
+print('ALL 80 CLASSES — NO PER-CLASS BREAKDOWN')
+print('=' * 72)
+
+for k33 in (
+    'mAP_50_95',
+    'AP50',
+    'AP75',
+    'AP95',
+    'AP_small',
+    'AP_medium',
+    'AP_large',
+    'AR1',
+    'AR10',
+    'AR100'
+):
+
+    print(
+        f'{k33:<16}: '
+        f'{100 * metrics33[k33]:.4f}%'
+    )
+
+print('\nAP for each IoU:')
+
+for iou33, ap33 in AP_iou33.items():
+
+    print(
+        f'IoU {iou33} : '
+        f'{100 * ap33:.4f}%'
+    )
+
+# ================================================================
+# 13. SAVE FINAL EVALUATION RESULTS
+# ================================================================
+
+output_dir33 = os.path.dirname(
+    BEST_CHECKPOINT
+)
+
+os.makedirs(
+    output_dir33,
+    exist_ok=True
+)
+
+summary_path33 = os.path.join(
+    output_dir33,
+    'step33_v13_official_coco_all80.json'
+)
+
+summary33 = {
+    'experiment': CONFIG['experiment_name'],
+    'checkpoint_epoch': ckpt33_epoch,
+    'dataset': 'COCO 2017 val',
+    'num_images': len(seen33),
+    'num_categories': 80,
+    'num_predictions': len(preds33),
+    'metrics': metrics33,
+    'AP_per_IoU': AP_iou33
 }
-
-summary_path = os.path.join(
-    COCO33_SAVE_DIR,
-    "step33_coco_bbox_map_all80_summary.json"
-)
 
 with open(
-    summary_path,
-    "w",
-    encoding="utf-8"
-) as f:
+    summary_path33 + '.tmp',
+    'w',
+    encoding='utf-8'
+) as f33:
 
     json.dump(
-        summary,
-        f,
+        summary33,
+        f33,
         indent=2,
         allow_nan=False
     )
 
-if COCO33_SAVE_PREDICTIONS:
-
-    prediction_path = os.path.join(
-        COCO33_SAVE_DIR,
-        "step33_coco_bbox_all80_detections.json"
-    )
-
-    with open(
-        prediction_path,
-        "w",
-        encoding="utf-8"
-    ) as f:
-
-        json.dump(
-            coco33_predictions,
-            f,
-            separators=(",", ":"),
-            allow_nan=False
-        )
-
-    print(
-        "Predictions saved:",
-        prediction_path
-    )
-
-print(
-    "Summary saved:",
-    summary_path
+os.replace(
+    summary_path33 + '.tmp',
+    summary_path33
 )
 
-print("\nSTEP 33 PASSED")
-print("No training performed.")
-print("No checkpoint weights changed.")
+print(
+    '\nResults saved:',
+    summary_path33
+)
+
+print('\nSTEP 33 PASSED')
+print('No training performed.')
+print('No checkpoint weights changed.')
