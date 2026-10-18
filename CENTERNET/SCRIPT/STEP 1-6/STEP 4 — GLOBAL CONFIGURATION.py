@@ -52,6 +52,7 @@ CONFIG = {
 
     # Engineering switches
     "run_engineering_sanity": False,
+    "run_tiny_overfit_diagnostic": True,
     "debug_finite_checks": False,
     "progress_every": 100,
 
@@ -94,3 +95,55 @@ CONFIG["val_annotations"] = os.path.join(
 
 print("=" * 70)
 print("CENTERNET GLOBAL CONFIG — BALANCED80K V1.3")
+print("=" * 70)
+
+for key, value in CONFIG.items():
+    print(f"{key:26s}: {value}")
+
+# Original invariants
+assert CONFIG["backbone"] == "resnet101"
+assert CONFIG["num_classes"] == 80
+assert CONFIG["input_size"] == 640
+assert CONFIG["output_stride"] == 4
+assert CONFIG["batch_size"] == 8
+assert CONFIG["num_workers"] == 8
+assert CONFIG["persistent_workers"] is True
+assert CONFIG["prefetch_factor"] == 4
+assert CONFIG["learning_rate"] == 1e-4
+assert CONFIG["weight_decay"] == 1e-4
+assert CONFIG["precision"] == "bfloat16"
+assert CONFIG["grad_clip_norm"] == 10.0
+assert CONFIG["score_threshold"] == 0.50
+assert CONFIG["iou_threshold"] == 0.50
+assert CONFIG["seed"] == 42
+
+# Balanced80K invariants
+assert CONFIG["source_epochs"] == 10
+assert CONFIG["source_images_per_epoch"] == 8000
+assert CONFIG["source_images_total"] == 80000
+assert CONFIG["source_images_per_class_per_epoch"] == 100
+
+assert (
+    CONFIG["source_epochs"]
+    * CONFIG["source_images_per_epoch"]
+    == CONFIG["source_images_total"]
+)
+
+assert (
+    CONFIG["source_images_per_class_per_epoch"]
+    * CONFIG["num_classes"]
+    == CONFIG["source_images_per_epoch"]
+)
+
+assert (
+    CONFIG["source_images_per_epoch"]
+    % CONFIG["batch_size"] == 0
+)
+
+assert CONFIG["use_fused_adamw"] is False
+assert CONFIG["use_channels_last"] is False
+
+print("BALANCED80K V1.3 CONFIG LOCKED")
+print("STEP 4 PASSED")
+
+assert CONFIG["train_horizontal_flip_p"] == 0.5
