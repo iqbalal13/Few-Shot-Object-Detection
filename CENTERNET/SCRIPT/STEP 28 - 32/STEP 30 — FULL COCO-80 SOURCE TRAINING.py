@@ -1,18 +1,16 @@
-
 # ============================================================
-# STEP 30 — CENTERNET-FSOD BALANCED80K V1.3 AUG+GAUSS
-# FRESH SOURCE TRAINING: 10 epochs x 8000 images
-# 100 selections/class/epoch, batch=8
-# 1000 updates/epoch = 10000 updates total
+# STEP 30 — EXCLUSIVE SOURCE TRAINING / CONTINUATION V1.2
+# 80K -> 120K -> 160K
+# ALL OPTIMIZER UPDATES ARE HERE
 # ============================================================
 
 import os
-import gc
 import json
-import math
-import time
-import random
 import hashlib
+import random
+import time
+import math
+import gc
 from collections import Counter
 
 import numpy as np
@@ -20,93 +18,86 @@ import torch
 from torch.utils.data import Sampler
 from google.colab import drive
 
-# ============================================================
-# 1. LOCKED PROTOCOL CHECKS
-# ============================================================
+drive.mount("/content/drive", force_remount=False)
 
-assert torch.cuda.is_available(), "Select GPU in Colab Runtime."
-assert torch.cuda.is_bf16_supported(), "BF16 GPU required."
-
-assert CONFIG["experiment_name"] == (
-    "CenterNet_COCO80_FSOD_BALANCED80K_V1_3_AUG_GAUSS_BS8"
-)
-
-assert CONFIG["source_epochs"] == 10
-assert CONFIG["source_images_per_epoch"] == 8000
-assert CONFIG["source_images_total"] == 80000
-assert CONFIG["source_images_per_class_per_epoch"] == 100
-assert CONFIG["num_classes"] == 80
-assert CONFIG["batch_size"] == 8
-assert CONFIG["max_objects"] == 128
-
+assert torch.cuda.is_available()
+assert torch.cuda.is_bf16_supported()
 assert len(train_dataset) == 118287
 assert len(val_dataset) == 5000
+assert not train_dataset.augment
+assert not val_dataset.augment
 
-EPOCHS = CONFIG["source_epochs"]
-IMAGES_PER_EPOCH = CONFIG["source_images_per_epoch"]
+assert CONFIG["source_epochs"] == 20
+assert CONFIG["source_images_total"] == 160000
+assert CONFIG["train_horizontal_flip_p"] == 0.0
+assert CONFIG["gaussian_radius_mode"] == "v1_2_original"
+assert not RUN_TINY_OVERFIT
+assert not RUN_ENGINEERING_SANITY
+assert CONFIG["max_objects"] == 128
 
-STEPS_PER_EPOCH = (
-    IMAGES_PER_EPOCH // CONFIG["batch_size"]
+EPOCHS = 20
+IMAGES_PER_EPOCH = 8000
+STEPS_PER_EPOCH = 1000
+MANIFEST_SEED = int(SEED) + 3000
+
+ROOT30 = "/content/drive/MyDrive"
+
+BASE_DIR30 = os.path.join(
+    ROOT30,
+    "CenterNet_COCO80_Source_BALANCED80K_V1_2_BS8"
 )
 
-SCHEDULER_TMAX = 25  # held constant to compare against V1.2
-MIN_GEOMETRY_DELTA = 1e-4
-
-MANIFEST_SEED = (
-    int(SEED)
-    + int(CONFIG["source_manifest_seed_offset"])
+FULL_CHECKPOINT_DIR = os.path.join(
+    ROOT30,
+    "CenterNet_COCO80_V12_CONTINUE_160K"
 )
 
-# ============================================================
-# 2. INDEPENDENT 80K EXPERIMENT DIRECTORY
-# ============================================================
+os.makedirs(FULL_CHECKPOINT_DIR, exist_ok=True)
 
-drive.mount(
-    "/content/drive",
-    force_remount=False
+BASE_LAST30 = os.path.join(
+    BASE_DIR30, "centernet_coco80_last.pth"
 )
 
-FULL_CHECKPOINT_DIR = (
-    "/content/drive/MyDrive/"
-    "CenterNet_COCO80_Source_BALANCED80K_V1_3_AUG_GAUSS_BS8"
+BASE_BEST30 = os.path.join(
+    BASE_DIR30, "centernet_coco80_best.pth"
 )
 
-os.makedirs(
-    FULL_CHECKPOINT_DIR,
-    exist_ok=True
+CONTINUE_LAST30 = os.path.join(
+    FULL_CHECKPOINT_DIR, "continue_last.pth"
 )
 
-BEST_CHECKPOINT = os.path.join(
-    FULL_CHECKPOINT_DIR,
-    "centernet_coco80_best.pth"
+MILESTONE15_30 = os.path.join(
+    FULL_CHECKPOINT_DIR, "epoch15_120k.pth"
 )
 
-LAST_CHECKPOINT = os.path.join(
-    FULL_CHECKPOINT_DIR,
-    "centernet_coco80_last.pth"
+MILESTONE20_30 = os.path.join(
+    FULL_CHECKPOINT_DIR, "epoch20_160k.pth"
 )
 
 MANIFEST_FILE = os.path.join(
     FULL_CHECKPOINT_DIR,
-    "balanced80k_v13_manifest.jsonl"
+    "continue_manifest_160k.jsonl"
 )
 
 HISTORY_FILE = os.path.join(
     FULL_CHECKPOINT_DIR,
-    "training_history.json"
+    "history.json"
 )
 
+assert os.path.isfile(BASE_LAST30), BASE_LAST30
+assert os.path.isfile(BASE_BEST30), BASE_BEST30
+
+
 # ============================================================
-# 3. CATEGORY POOL — SAME RULES AS STEPS 10/11/16
+# 1. VALID COCO CATEGORY POOL
+# SAME LOGIC AS ORIGINAL V1.2 SOURCE TRAINING
 # ============================================================
 
 def valid_target_categories(image_id):
-
     coco = train_dataset.coco
     info = coco.imgs[image_id]
 
     size = int(CONFIG["input_size"])
-
     scale = min(
         size / info["width"],
         size / info["height"]
@@ -121,12 +112,11 @@ def valid_target_categories(image_id):
     ) // 2
 
     annotations = [
-        ann
-        for ann in coco.imgToAnns.get(image_id, [])
-        if not ann.get("iscrowd", 0)
-        and ann["bbox"][2] > 1
-        and ann["bbox"][3] > 1
-        and ann["category_id"]
+        a for a in coco.imgToAnns.get(image_id, [])
+        if not a.get("iscrowd", 0)
+        and a["bbox"][2] > 1
+        and a["bbox"][3] > 1
+        and a["category_id"]
         in train_dataset.cat_id_to_contiguous
     ]
 
@@ -136,8 +126,8 @@ def valid_target_categories(image_id):
     boxes = np.asarray(
         [
             [x, y, x + w, y + h]
-            for ann in annotations
-            for x, y, w, h in [ann["bbox"]]
+            for a in annotations
+            for x, y, w, h in [a["bbox"]]
         ],
         dtype=np.float32
     )
@@ -149,58 +139,43 @@ def valid_target_categories(image_id):
     boxes[:, [1, 3]] += pad_y
 
     boxes[:, [0, 2]] = np.clip(
-        boxes[:, [0, 2]],
-        0,
-        size - 1
+        boxes[:, [0, 2]], 0, size - 1
     )
 
     boxes[:, [1, 3]] = np.clip(
-        boxes[:, [1, 3]],
-        0,
-        size - 1
+        boxes[:, [1, 3]], 0, size - 1
     )
 
-    valid = (
+    good = (
         (boxes[:, 2] - boxes[:, 0] > 1)
         & (boxes[:, 3] - boxes[:, 1] > 1)
     )
 
-    centers_x = (
-        (boxes[:, 0] + boxes[:, 2])
-        / (2 * CONFIG["output_stride"])
-    )
+    cx = (
+        boxes[:, 0] + boxes[:, 2]
+    ) / (2 * CONFIG["output_stride"])
 
-    centers_y = (
-        (boxes[:, 1] + boxes[:, 3])
-        / (2 * CONFIG["output_stride"])
-    )
+    cy = (
+        boxes[:, 1] + boxes[:, 3]
+    ) / (2 * CONFIG["output_stride"])
 
-    out_size = (
-        size // CONFIG["output_stride"]
-    )
+    dim = size // CONFIG["output_stride"]
 
-    valid &= (
-        (centers_x >= 0)
-        & (centers_x < out_size)
-    )
-
-    valid &= (
-        (centers_y >= 0)
-        & (centers_y < out_size)
+    good &= (
+        (cx >= 0)
+        & (cx < dim)
+        & (cy >= 0)
+        & (cy < dim)
     )
 
     result = set()
     included = 0
 
-    for ann, good in zip(annotations, valid):
-
-        if not good:
+    for ann, valid in zip(annotations, good):
+        if not valid:
             continue
 
-        result.add(
-            ann["category_id"]
-        )
-
+        result.add(ann["category_id"])
         included += 1
 
         if included >= CONFIG["max_objects"]:
@@ -210,7 +185,7 @@ def valid_target_categories(image_id):
 
 
 # ============================================================
-# 4. DETERMINISTIC BALANCED80K MANIFEST
+# 2. DETERMINISTIC BALANCED MANIFEST
 # ============================================================
 
 def build_balanced80k_manifest():
@@ -228,30 +203,19 @@ def build_balanced80k_manifest():
     }
 
     for image_id in train_dataset.image_ids:
-
-        categories = valid_target_categories(
-            image_id
-        )
-
-        for cat_id in categories:
+        for cat_id in valid_target_categories(image_id):
             pools[cat_id].append(image_id)
 
     assert len(pools) == 80
-
-    assert all(
-        len(pool) > 0
-        for pool in pools.values()
-    ), "Empty category pool detected."
+    assert all(pools.values())
 
     streams = {}
 
     for cat_id, pool in pools.items():
-
         ids = sorted(pool)
 
         rng = random.Random(
-            MANIFEST_SEED
-            + int(cat_id) * 1000003
+            MANIFEST_SEED + int(cat_id) * 1000003
         )
 
         rng.shuffle(ids)
@@ -263,15 +227,12 @@ def build_balanced80k_manifest():
         }
 
     def next_image(cat_id):
-
         stream = streams[cat_id]
 
         if stream["cursor"] >= len(stream["ids"]):
-
             stream["rng"].shuffle(
                 stream["ids"]
             )
-
             stream["cursor"] = 0
 
         image_id = stream["ids"][
@@ -279,7 +240,6 @@ def build_balanced80k_manifest():
         ]
 
         stream["cursor"] += 1
-
         return image_id
 
     manifest = []
@@ -305,16 +265,12 @@ def build_balanced80k_manifest():
         for position, cat_id in enumerate(
             categories
         ):
-
             chosen = None
 
             for _ in range(
                 len(streams[cat_id]["ids"])
             ):
-
-                candidate = next_image(
-                    cat_id
-                )
+                candidate = next_image(cat_id)
 
                 if candidate not in used_in_epoch:
                     chosen = candidate
@@ -338,113 +294,147 @@ def build_balanced80k_manifest():
     return manifest
 
 
-# ============================================================
-# 5. EPOCH-SPECIFIC SAMPLER
-# ============================================================
-
 class BalancedManifestSampler(Sampler):
 
     def __init__(self, manifest):
-
-        self.indices_by_epoch = {
-            epoch: [
-                row["dataset_index"]
-                for row in manifest
-                if row["epoch"] == epoch
-            ]
-            for epoch in range(
-                1,
-                EPOCHS + 1
-            )
+        self.by_epoch = {
+            e: []
+            for e in range(1, EPOCHS + 1)
         }
 
+        for row in manifest:
+            self.by_epoch[
+                row["epoch"]
+            ].append(
+                row["dataset_index"]
+            )
+
         assert all(
-            len(indices) == IMAGES_PER_EPOCH
-            for indices
-            in self.indices_by_epoch.values()
+            len(v) == 8000
+            for v in self.by_epoch.values()
         )
 
         self.epoch = 1
 
     def set_epoch(self, epoch):
-
         assert 1 <= epoch <= EPOCHS
-
         self.epoch = epoch
 
     def __iter__(self):
-
         return iter(
-            self.indices_by_epoch[self.epoch]
+            self.by_epoch[self.epoch]
         )
 
     def __len__(self):
+        return 8000
 
-        return len(
-            self.indices_by_epoch[self.epoch]
-        )
+
+def atomic_torch_save(payload, path):
+    tmp = path + ".tmp"
+    torch.save(payload, tmp)
+    os.replace(tmp, path)
 
 
 # ============================================================
-# 6. BUILD AND VALIDATE MANIFEST
+# 3. BUILD AND VERIFY MANIFEST
 # ============================================================
 
-print(
-    "Building Balanced80K manifest "
-    "from COCO train2017..."
-)
+print("Rebuilding deterministic 160K manifest...")
 
 source_manifest = build_balanced80k_manifest()
 
-assert len(source_manifest) == (
-    CONFIG["source_images_total"]
-)
+assert len(source_manifest) == 160000
 
-for epoch in range(1, EPOCHS + 1):
-
+for e in range(1, 21):
     counts = Counter(
-        row["selected_category_id"]
-        for row in source_manifest
-        if row["epoch"] == epoch
+        r["selected_category_id"]
+        for r in source_manifest
+        if r["epoch"] == e
     )
 
     assert len(counts) == 80
-
     assert all(
-        counts[cat_id] == 100
-        for cat_id in train_dataset.cat_ids
+        v == 100
+        for v in counts.values()
     )
 
-    assert sum(counts.values()) == IMAGES_PER_EPOCH
+
+def serialize_manifest(rows):
+    return b"".join(
+        (
+            json.dumps(
+                row,
+                sort_keys=True,
+                separators=(",", ":")
+            ) + "\n"
+        ).encode("utf8")
+        for row in rows
+    )
 
 
-manifest_bytes = b"".join(
-    (
-        json.dumps(
-            row,
-            sort_keys=True,
-            separators=(",", ":")
-        ) + "\n"
-    ).encode("utf-8")
-    for row in source_manifest
+manifest_bytes = serialize_manifest(
+    source_manifest
 )
 
 source_manifest_sha256 = hashlib.sha256(
     manifest_bytes
 ).hexdigest()
 
+prefix_sha30 = hashlib.sha256(
+    serialize_manifest(
+        source_manifest[:80000]
+    )
+).hexdigest()
+
+
+# ============================================================
+# 4. VERIFY ORIGINAL V1.2 BASE CHECKPOINT
+# ============================================================
+
+base30 = torch.load(
+    BASE_LAST30,
+    map_location="cpu",
+    weights_only=False
+)
+
+assert base30["experiment_name"] == (
+    "CenterNet_COCO80_FSOD_BALANCED80K_V1_2_BS8"
+)
+
+assert int(base30["epoch"]) == 10
+
+assert int(
+    base30["source_images_total"]
+) == 80000
+
+assert (
+    base30["source_manifest_sha256"]
+    == prefix_sha30
+), "Original 80K manifest differs. STOP."
+
+for key in [
+    "model_state_dict",
+    "optimizer_state_dict",
+    "scheduler_state_dict",
+    "rng_state"
+]:
+    assert key in base30
+
+
+# ============================================================
+# 5. VERIFY OR SAVE 160K MANIFEST
+# ============================================================
+
 if os.path.isfile(MANIFEST_FILE):
 
     with open(MANIFEST_FILE, "rb") as f:
+        existing = f.read()
 
-        if f.read() != manifest_bytes:
-            raise RuntimeError(
-                "Manifest mismatch: use a separate "
-                "experiment directory."
-            )
+    assert existing == manifest_bytes, (
+        "160K manifest differs. STOP."
+    )
 
 else:
-
     with open(
         MANIFEST_FILE + ".tmp",
         "wb"
@@ -456,145 +446,100 @@ else:
         MANIFEST_FILE
     )
 
-print(
-    "Manifest SHA256:",
-    source_manifest_sha256
-)
+print("80K SHA256 :", prefix_sha30)
+print("160K SHA256:", source_manifest_sha256)
 
 print(
-    "Image exposures:",
-    len(source_manifest)
-)
-
-print(
-    "Unique image IDs:",
+    "Unique images:",
     len({
-        row["image_id"]
-        for row in source_manifest
+        r["image_id"]
+        for r in source_manifest
     })
 )
 
-print(
-    "Optimizer updates:",
-    EPOCHS * STEPS_PER_EPOCH
-)
-
 
 # ============================================================
-# 7. FRESH MODEL INITIALIZATION
-# INTERNAL RESUME ONLY FOR INTERRUPTED 80K RUNS
+# 6. SELECT CONTINUATION STATE
 # ============================================================
 
-resume = None
+resume30 = None
 
-if os.path.isfile(LAST_CHECKPOINT):
+if os.path.isfile(CONTINUE_LAST30):
 
-    resume = torch.load(
-        LAST_CHECKPOINT,
+    resume30 = torch.load(
+        CONTINUE_LAST30,
         map_location="cpu",
         weights_only=False
     )
 
-    assert resume.get(
-        "experiment_name"
-    ) == CONFIG["experiment_name"]
-
-    assert resume.get(
-        "source_manifest_sha256"
-    ) == source_manifest_sha256
-
-    assert resume.get(
-        "source_images_total"
-    ) == 80000
+    assert resume30["source_base"] == "V1.2"
 
     assert (
-        1 <= int(resume.get("epoch", -1))
-        <= EPOCHS
+        resume30["manifest_sha256"]
+        == source_manifest_sha256
     )
 
-    assert len(resume.get(
-        "history", []
-    )) == int(resume["epoch"])
+    assert 11 <= int(resume30["epoch"]) <= 20
 
-    assert "rng_state" in resume
-
-    assert os.path.isfile(BEST_CHECKPOINT), (
-        "Last checkpoint exists but best is missing."
+    assert (
+        len(resume30["history"])
+        == int(resume30["epoch"]) - 10
     )
 
-else:
 
-    if os.path.isfile(BEST_CHECKPOINT):
-        raise RuntimeError(
-            "Best exists but last is missing; "
-            "inspect experiment folder."
-        )
-
-    random.seed(MANIFEST_SEED)
-    np.random.seed(MANIFEST_SEED)
-
-    torch.manual_seed(MANIFEST_SEED)
-    torch.cuda.manual_seed_all(MANIFEST_SEED)
-
-
-model = CenterNetResNet101(
-    num_classes=CONFIG["num_classes"],
-    pretrained_backbone=(resume is None)
-).to(device)
-
-optimizer = build_source_optimizer(
-    model
+state30 = (
+    resume30
+    if resume30 is not None
+    else base30
 )
 
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-    optimizer,
-    T_max=SCHEDULER_TMAX
+start_epoch30 = int(state30["epoch"])
+
+print(
+    "Starting from completed epoch:",
+    start_epoch30
 )
 
-start_epoch = 0
-best_geometry = -1.0
-best_ap50 = -1.0
-best_val_loss = float("inf")
-history = []
 
-if resume is not None:
+# ============================================================
+# 7. TRAIN ONLY IF EPOCH 20 IS NOT COMPLETE
+# ============================================================
+
+if start_epoch30 < 20:
+
+    model = CenterNetResNet101(
+        num_classes=80,
+        pretrained_backbone=False
+    ).to(device)
 
     model.load_state_dict(
-        resume["model_state_dict"]
+        state30["model_state_dict"],
+        strict=True
     )
 
+    optimizer = build_source_optimizer(model)
+
     optimizer.load_state_dict(
-        resume["optimizer_state_dict"]
+        state30["optimizer_state_dict"]
+    )
+
+    scheduler = (
+        torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=25
+        )
     )
 
     scheduler.load_state_dict(
-        resume["scheduler_state_dict"]
+        state30["scheduler_state_dict"]
     )
 
-    start_epoch = int(
-        resume["epoch"]
-    )
+    assert scheduler.last_epoch == start_epoch30
 
-    best_geometry = float(resume["best_geometry"])
-    best_ap50 = float(resume["best_ap50"])
+    rs = state30["rng_state"]
 
-    best_val_loss = float(
-        resume["best_val_loss"]
-    )
-
-    history = list(
-        resume["history"]
-    )
-
-    rs = resume["rng_state"]
-
-    random.setstate(
-        rs["python"]
-    )
-
-    np.random.set_state(
-        rs["numpy"]
-    )
+    random.setstate(rs["python"])
+    np.random.set_state(rs["numpy"])
 
     torch.set_rng_state(
         rs["torch_cpu"].cpu()
@@ -604,386 +549,301 @@ if resume is not None:
         rs["torch_cuda"]
     )
 
-    print(
-        "Resuming Balanced80K after epoch:",
-        start_epoch
+    history = (
+        list(resume30["history"])
+        if resume30 is not None
+        else []
     )
 
-    del resume
-
-else:
-
-    print(
-        "Fresh 80K training from ImageNet "
-        "pretrained backbone"
+    source_sampler = BalancedManifestSampler(
+        source_manifest
     )
 
-
-# ============================================================
-# 8. OPTIMIZED WORKER DATALOADERS
-# ============================================================
-
-if "train_loader" in globals():
-    del train_loader
-
-gc.collect()
-
-source_sampler = BalancedManifestSampler(
-    source_manifest
-)
-
-full_train_loader, full_train_generator = (
-    build_train_loader(
+    (
+        full_train_loader,
+        full_train_generator
+    ) = build_train_loader(
         MANIFEST_SEED,
         sampler=source_sampler,
         encoded=True
     )
-)
 
-source_val_loader, source_val_generator = (
-    build_val_loader(
+    (
+        source_val_loader,
+        source_val_generator
+    ) = build_val_loader(
         SEED + 3301,
         encoded=True
     )
-)
 
-assert STEPS_PER_EPOCH == 1000
-assert len(full_train_loader) == 1000
+    assert len(full_train_loader) == STEPS_PER_EPOCH
+    assert len(source_val_loader) == 625
 
-assert len(source_val_loader) == math.ceil(
-    5000 / CONFIG["batch_size"]
-)
+    # Test real worker target encoding.
+    source_sampler.set_epoch(
+        start_epoch30 + 1
+    )
 
-print(
-    "Train batches per epoch:",
-    len(full_train_loader)
-)
+    _, _, encoded_smoke30 = next(
+        iter(full_train_loader)
+    )
 
-print(
-    "Validation batches:",
-    len(source_val_loader)
-)
+    assert encoded_smoke30["heatmap"].shape == (
+        8, 80, 160, 160
+    )
 
+    del encoded_smoke30
 
-# ============================================================
-# 9. BF16 NUMERICAL HEALTH CHECK
-# ============================================================
+    # ========================================================
+    # 8. EXCLUSIVE TRAINING LOOP
+    # ========================================================
 
-model.eval()
-
-health_image, health_target = val_dataset[0]
-
-with torch.inference_mode():
-
-    with torch.amp.autocast(
-        device_type="cuda",
-        dtype=torch.bfloat16
+    for epoch in range(
+        start_epoch30 + 1,
+        21
     ):
 
-        health_outputs = model(
-            health_image.unsqueeze(0).to(
-                device
-            )
+        source_sampler.set_epoch(epoch)
+
+        full_train_generator.manual_seed(
+            MANIFEST_SEED + epoch
         )
 
-    assert_outputs_finite(
-        health_outputs,
-        "Step30 80K BF16 health"
-    )
+        print(
+            f"\nSTEP 30 TRAIN epoch {epoch}/20"
+            f" | exposures {epoch*8000:,}"
+        )
 
-    encoded_health = build_batch_centernet_targets(
-        [health_target],
-        device=device
-    )
+        t0 = time.perf_counter()
 
-    health_loss = criterion(
-        health_outputs,
-        encoded_health
-    )["loss_total"]
+        train_stats = train_centernet_epoch(
+            model,
+            full_train_loader,
+            optimizer
+        )
 
-    assert bool(
-        torch.isfinite(health_loss).item()
-    ), "Health loss NaN/Inf"
+        assert train_stats["batches"] == STEPS_PER_EPOCH
 
-del health_image
-del health_target
-del health_outputs
-del encoded_health
-del health_loss
+        scheduler.step()
 
+        record30 = {
+            "epoch": epoch,
+            "exposures": epoch * 8000,
+            "train": train_stats,
+            "train_seconds": (
+                time.perf_counter() - t0
+            ),
+            "learning_rate_next": (
+                optimizer.param_groups[0]["lr"]
+            )
+        }
 
-# ============================================================
-# 10. ATOMIC CHECKPOINT SAVE
-# ============================================================
+        # ====================================================
+        # 9. EVALUATE 120K AND 160K MILESTONES
+        # ====================================================
 
-def atomic_torch_save(payload, path):
+        if epoch in (15, 20):
 
-    tmp = path + ".tmp"
+            val_stats = evaluate_centernet(
+                model,
+                source_val_loader,
+                max_batches=None,
+                score_threshold=0.50,
+                iou_threshold=0.50,
+                compute_official_ap=True
+            )
 
-    torch.save(payload, tmp)
+            record30["validation"] = val_stats
 
-    os.replace(tmp, path)
+            assert val_stats["official_map"] is not None
 
+            milestone = (
+                MILESTONE15_30
+                if epoch == 15
+                else MILESTONE20_30
+            )
 
-# ============================================================
-# 11. TRAINING — 10 EPOCHS
-# NO EARLY STOPPING
-# FULL COCO-VAL EACH EPOCH
-# ============================================================
+            atomic_torch_save(
+                {
+                    "model_state_dict": model.state_dict(),
+                    "epoch": epoch,
+                    "source_base": "V1.2",
+                    "source_images_total": epoch * 8000,
+                    "manifest_sha256": (
+                        source_manifest_sha256
+                    ),
+                    "val_stats": val_stats
+                },
+                milestone
+            )
 
-wall_start = time.perf_counter()
+            print(
+                "COCO mAP:",
+                val_stats["official_map"]
+            )
 
-for epoch in range(
-    start_epoch + 1,
-    EPOCHS + 1
-):
+            print(
+                "AP50:",
+                val_stats["official_ap50"]
+            )
 
-    source_sampler.set_epoch(
-        epoch
-    )
+            print(
+                "AP75:",
+                val_stats["official_ap75"]
+            )
 
-    full_train_generator.manual_seed(
-        MANIFEST_SEED + epoch
-    )
+        # ====================================================
+        # 10. SAVE RESUMABLE CHECKPOINT
+        # ====================================================
 
-    print(
-        f"\nBALANCED80K epoch {epoch}/{EPOCHS} "
-        f"({STEPS_PER_EPOCH} steps)"
-    )
-
-    # --------------------------------------------------------
-    # TRAINING
-    # --------------------------------------------------------
-
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
-
-    train_stats = train_centernet_epoch(
-        model,
-        full_train_loader,
-        optimizer,
-        max_batches=None
-    )
-
-    torch.cuda.synchronize()
-
-    train_seconds = (
-        time.perf_counter() - t0
-    )
-
-    assert train_stats["batches"] == STEPS_PER_EPOCH
-
-    # --------------------------------------------------------
-    # FULL COCO VALIDATION
-    # --------------------------------------------------------
-
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
-
-    val_stats = evaluate_centernet(
-        model,
-        source_val_loader,
-        max_batches=None,
-        score_threshold=CONFIG["score_threshold"],
-        iou_threshold=CONFIG["iou_threshold"],
-        compute_official_ap=True
-    )
-
-    torch.cuda.synchronize()
-
-    val_seconds = (
-        time.perf_counter() - t0
-    )
-
-    # --------------------------------------------------------
-    # BEST CHECKPOINT CRITERION
-    # --------------------------------------------------------
-
-    geometry = float(
-        val_stats["geometry50"]
-    )
-
-    val_loss = float(
-        val_stats["loss"]
-    )
-
-    official_ap50 = float(val_stats["official_ap50"])
-    assert math.isfinite(official_ap50)
-    # Selection metric: official COCO AP50 across all 80 classes.
-    is_best = (
-        official_ap50 > best_ap50 + 1e-6
-        or (abs(official_ap50-best_ap50) <= 1e-6
-            and val_loss < best_val_loss)
-    )
-
-    # --------------------------------------------------------
-    # EPOCH STATISTICS
-    # --------------------------------------------------------
-
-    record = {
-        "epoch": epoch,
-        "train_stats": train_stats,
-        "val_stats": val_stats,
-        "train_seconds": train_seconds,
-        "val_seconds": val_seconds,
-        "seconds_per_step": (
-            train_seconds / STEPS_PER_EPOCH
-        ),
-        "learning_rate_before_scheduler_step": (
-            optimizer.param_groups[0]["lr"]
-        ),
-        "exposures_seen": epoch * IMAGES_PER_EPOCH
-    }
-
-    history.append(record)
-
-    print(
-        f"Epoch {epoch}/{EPOCHS} "
-        f"| train={train_seconds / 60:.2f}min "
-        f"| val={val_seconds / 60:.2f}min "
-        f"| {record['seconds_per_step']:.3f}s/step "
-        f"| AP50={official_ap50:.5f} "
-        f"| Geometry50={geometry:.5f} "
-        f"| val_loss={val_loss:.5f}"
-    )
-
-    # --------------------------------------------------------
-    # BEST CHECKPOINT
-    # --------------------------------------------------------
-
-    if is_best:
-
-        best_geometry = geometry
-        best_ap50 = official_ap50
-        best_val_loss = val_loss
+        history.append(record30)
 
         atomic_torch_save(
             {
                 "model_state_dict": model.state_dict(),
-                "epoch": epoch,
-                "actual_images_seen_at_checkpoint": (
-                    epoch * IMAGES_PER_EPOCH
+                "optimizer_state_dict": (
+                    optimizer.state_dict()
                 ),
-                "train_stats": train_stats,
-                "val_stats": val_stats,
-                "config": dict(CONFIG),
-                "experiment_name": CONFIG[
-                    "experiment_name"
-                ],
-                "source_manifest_sha256": (
+                "scheduler_state_dict": (
+                    scheduler.state_dict()
+                ),
+                "epoch": epoch,
+                "source_base": "V1.2",
+                "manifest_sha256": (
                     source_manifest_sha256
                 ),
-                "source_images_total": CONFIG[
-                    "source_images_total"
-                ],
-                "precision_mode": "bfloat16"
+                "history": history,
+                "rng_state": {
+                    "python": random.getstate(),
+                    "numpy": np.random.get_state(),
+                    "torch_cpu": torch.get_rng_state(),
+                    "torch_cuda": (
+                        torch.cuda.get_rng_state_all()
+                    )
+                }
             },
-            BEST_CHECKPOINT
+            CONTINUE_LAST30
+        )
+
+        with open(
+            HISTORY_FILE + ".tmp",
+            "w",
+            encoding="utf-8"
+        ) as f:
+            json.dump(
+                history, f, indent=2
+            )
+
+        os.replace(
+            HISTORY_FILE + ".tmp",
+            HISTORY_FILE
         )
 
         print(
-            "Saved new best checkpoint at epoch",
-            epoch
+            "Saved epoch", epoch,
+            "| train_loss", train_stats["loss"]
         )
 
-    # --------------------------------------------------------
-    # SCHEDULER
-    # --------------------------------------------------------
+    del model, optimizer, scheduler
+    torch.cuda.empty_cache()
 
-    scheduler.step()
-
-    # --------------------------------------------------------
-    # LAST CHECKPOINT — INCLUDES RNG STATE
-    # --------------------------------------------------------
-
-    atomic_torch_save(
-        {
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict(),
-            "epoch": epoch,
-            "best_geometry": best_geometry,
-            "best_ap50": best_ap50,
-            "best_val_loss": best_val_loss,
-            "history": history,
-            "config": dict(CONFIG),
-            "experiment_name": CONFIG[
-                "experiment_name"
-            ],
-            "source_manifest_sha256": (
-                source_manifest_sha256
-            ),
-            "source_images_total": CONFIG[
-                "source_images_total"
-            ],
-            "rng_state": {
-                "python": random.getstate(),
-                "numpy": np.random.get_state(),
-                "torch_cpu": torch.get_rng_state(),
-                "torch_cuda": torch.cuda.get_rng_state_all()
-            }
-        },
-        LAST_CHECKPOINT
-    )
-
-    # --------------------------------------------------------
-    # JSON TRAINING HISTORY
-    # --------------------------------------------------------
-
-    with open(
-        HISTORY_FILE + ".tmp",
-        "w",
-        encoding="utf-8"
-    ) as f:
-
-        json.dump(
-            history,
-            f,
-            indent=2
-        )
-
-    os.replace(
-        HISTORY_FILE + ".tmp",
-        HISTORY_FILE
-    )
-
-    elapsed = (
-        time.perf_counter() - wall_start
-    ) / 60
-
+else:
     print(
-        "Saved last checkpoint; "
-        f"total Step30 elapsed: {elapsed:.2f} min"
+        "160K checkpoint already finished."
+    )
+    print(
+        "NO retraining needed."
     )
 
 
 # ============================================================
-# 12. FINAL STATUS
+# 11. FINAL CHECKPOINT VALIDATION
 # ============================================================
 
-assert len(history) == EPOCHS
-
-assert history[-1]["exposures_seen"] == 80000
-
-print(
-    "\nSTEP 30 FINISHED: "
-    "10 epochs / 80,000 exposures / 10,000 updates"
+assert os.path.isfile(CONTINUE_LAST30), (
+    "Missing resumable checkpoint."
 )
 
-print("Best AP50:",best_ap50)
-print("Geometry50 at best checkpoint:",best_geometry)
-
-print(
-    "Best checkpoint:",
-    BEST_CHECKPOINT
+last30 = torch.load(
+    CONTINUE_LAST30,
+    map_location="cpu",
+    weights_only=False
 )
 
-print(
-    "Last checkpoint:",
-    LAST_CHECKPOINT
+assert int(last30["epoch"]) == 20
+
+assert (
+    last30["manifest_sha256"]
+    == source_manifest_sha256
 )
 
-print(
-    "Manifest SHA256:",
-    source_manifest_sha256
+assert os.path.isfile(MILESTONE15_30)
+assert os.path.isfile(MILESTONE20_30)
+
+
+# ============================================================
+# 12. PICK BEST MILESTONE BY OFFICIAL mAP
+# ============================================================
+
+candidates30 = [
+    MILESTONE15_30,
+    MILESTONE20_30
+]
+
+
+def stored_map30(path):
+    c = torch.load(
+        path,
+        map_location="cpu",
+        weights_only=False
+    )
+
+    assert c["source_base"] == "V1.2"
+
+    assert (
+        c["manifest_sha256"]
+        == source_manifest_sha256
+    )
+
+    return float(
+        c["val_stats"]["official_map"]
+    )
+
+
+BEST_CHECKPOINT = max(
+    candidates30,
+    key=stored_map30
 )
+
+LAST_CHECKPOINT = CONTINUE_LAST30
+
+best_meta30 = torch.load(
+    BEST_CHECKPOINT,
+    map_location="cpu",
+    weights_only=False
+)
+
+# The validation loader must exist even if training was skipped.
+if "source_val_loader" not in globals():
+    (
+        source_val_loader,
+        source_val_generator
+    ) = build_val_loader(
+        SEED + 3301,
+        encoded=True
+    )
+
+print("\n" + "=" * 65)
+print("STEP 30 COMPLETE")
+print("=" * 65)
+
+print("Completed epoch:", last30["epoch"])
+print("Selected checkpoint:", BEST_CHECKPOINT)
+print("Best checkpoint epoch:", best_meta30["epoch"])
+
+print(
+    "Best checkpoint mAP:",
+    best_meta30["val_stats"]["official_map"]
+)
+
+print("Original checkpoints remain unchanged.")
