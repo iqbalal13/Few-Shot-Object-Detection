@@ -1,38 +1,33 @@
+
 # ============================================================
-# STEP 33 — OFFICIAL FULL COCOeval
-# ALL 80 CLASSES / ALL 5000 COCO-VAL IMAGES
+# STEP 33 — B1 OFFICIAL COCO EVALUATION
+# 80 CLASSES / ALL 5000 COCO-VAL IMAGES
+# FIXED 160K + BEST CHECKPOINT
 # NO TRAINING
 # ============================================================
 
 import os
-import json
+import gc
 import math
 import io
 import contextlib
-import gc
 
 import numpy as np
 import torch
 
 from pycocotools.cocoeval import COCOeval
 
+
 assert len(val_dataset) == 5000
 assert not val_dataset.augment
 assert os.path.isfile(BEST_CHECKPOINT)
+assert os.path.isfile(milestone30(20))
 
-OFFICIAL_COCO_CACHE = globals().get(
-    "OFFICIAL_COCO_CACHE", {}
-)
+OFFICIAL_COCO_CACHE = {}
 
-
-# ============================================================
-# 1. REUSABLE OFFICIAL EVALUATOR
-# ============================================================
 
 def evaluate_official_checkpoint(path, label):
-
     if path in OFFICIAL_COCO_CACHE:
-        print("Using cached COCOeval:", label)
         return OFFICIAL_COCO_CACHE[path]
 
     ckpt = torch.load(
@@ -42,7 +37,6 @@ def evaluate_official_checkpoint(path, label):
     )
 
     assert "model_state_dict" in ckpt
-    assert "epoch" in ckpt
 
     model_eval = CenterNetResNet101(
         num_classes=80,
@@ -59,14 +53,8 @@ def evaluate_official_checkpoint(path, label):
     detections = []
     seen = set()
 
-    # ========================================================
-    # 2. FULL COCO-VAL INFERENCE
-    # ========================================================
-
     with torch.inference_mode():
-
         for batch in source_val_loader:
-
             images, targets = batch[0], batch[1]
 
             images = images.to(
@@ -78,11 +66,11 @@ def evaluate_official_checkpoint(path, label):
                 "cuda",
                 dtype=torch.bfloat16
             ):
-                raw = model_eval(images)
+                raw_outputs = model_eval(images)
 
             outputs = {
                 k: v.float()
-                for k, v in raw.items()
+                for k, v in raw_outputs.items()
             }
 
             predictions = decode_centernet(
@@ -91,14 +79,10 @@ def evaluate_official_checkpoint(path, label):
                 score_threshold=0.0
             )
 
-            # =================================================
-            # 3. RESTORE ORIGINAL COCO COORDINATES
-            # =================================================
-
             for pred, target in zip(
-                predictions, targets
+                predictions,
+                targets
             ):
-
                 image_id = int(
                     target["image_id"].item()
                 )
@@ -159,7 +143,6 @@ def evaluate_official_checkpoint(path, label):
                     scores,
                     labels
                 ):
-
                     x1, y1, x2, y2 = map(
                         float, box
                     )
@@ -171,15 +154,14 @@ def evaluate_official_checkpoint(path, label):
                     ):
                         continue
 
-                    assert 0 <= cls < 80
-
                     detections.append({
                         "image_id": image_id,
                         "category_id": int(
-                            val_dataset.cat_ids[cls]
+                            val_dataset.cat_ids[int(cls)]
                         ),
                         "bbox": [
-                            x1, y1,
+                            x1,
+                            y1,
                             x2 - x1,
                             y2 - y1
                         ],
@@ -190,16 +172,9 @@ def evaluate_official_checkpoint(path, label):
         map(int, val_dataset.image_ids)
     )
 
-    assert detections
+    assert len(detections) > 0
 
-    # ========================================================
-    # 4. OFFICIAL COCOeval
-    # ========================================================
-
-    with contextlib.redirect_stdout(
-        io.StringIO()
-    ):
-
+    with contextlib.redirect_stdout(io.StringIO()):
         dt = val_dataset.coco.loadRes(
             detections
         )
@@ -218,10 +193,7 @@ def evaluate_official_checkpoint(path, label):
             map(int, val_dataset.cat_ids)
         )
 
-        ce.params.maxDets = [
-            1, 10, 100
-        ]
-
+        ce.params.maxDets = [1, 10, 100]
         ce.params.iouThrs = np.linspace(
             0.50, 0.95, 10
         )
@@ -229,46 +201,6 @@ def evaluate_official_checkpoint(path, label):
         ce.evaluate()
         ce.accumulate()
         ce.summarize()
-
-    # ========================================================
-    # 5. AP AT EVERY IoU THRESHOLD
-    # ========================================================
-
-    precision = ce.eval["precision"]
-
-    area_idx = ce.params.areaRngLbl.index(
-        "all"
-    )
-
-    det_idx = ce.params.maxDets.index(
-        100
-    )
-
-    per_iou = {}
-
-    for idx, threshold in enumerate(
-        ce.params.iouThrs
-    ):
-
-        values = precision[
-            idx,
-            :,
-            :,
-            area_idx,
-            det_idx
-        ]
-
-        valid = values[values >= 0]
-
-        per_iou[f"{threshold:.2f}"] = (
-            float(valid.mean())
-            if len(valid)
-            else None
-        )
-
-    # ========================================================
-    # 6. COCO AP / AR METRICS
-    # ========================================================
 
     names = [
         "mAP_50_95",
@@ -292,7 +224,51 @@ def evaluate_official_checkpoint(path, label):
         )
     }
 
-    metrics["AP95"] = per_iou["0.95"]
+    precision = ce.eval["precision"]
+    area_idx = ce.params.areaRngLbl.index("all")
+    det_idx = ce.params.maxDets.index(100)
+
+    ap_by_iou = {}
+
+    for idx, threshold in enumerate(
+        ce.params.iouThrs
+    ):
+        values = precision[
+            idx, :, :, area_idx, det_idx
+        ]
+
+        valid = values[values >= 0]
+
+        ap_by_iou[f"{threshold:.2f}"] = (
+            float(valid.mean())
+            if len(valid)
+            else None
+        )
+
+    metrics["AP95"] = ap_by_iou["0.95"]
+
+    # Person category in original COCO IDs = 1
+    person_idx = ce.params.catIds.index(1)
+
+    person_precision = precision[
+        :, :, person_idx, area_idx, det_idx
+    ]
+
+    def valid_average(array):
+        v = array[array >= 0]
+        return float(v.mean()) if len(v) else None
+
+    person_metrics = {
+        "person_AP_50_95": valid_average(
+            person_precision
+        ),
+        "person_AP50": valid_average(
+            person_precision[0]
+        ),
+        "person_AP75": valid_average(
+            person_precision[5]
+        )
+    }
 
     result = {
         "label": label,
@@ -301,14 +277,14 @@ def evaluate_official_checkpoint(path, label):
         "images": len(seen),
         "detections": len(detections),
         "metrics": metrics,
-        "AP_by_IoU": per_iou
+        "person_metrics": person_metrics,
+        "AP_by_IoU": ap_by_iou
     }
 
     OFFICIAL_COCO_CACHE[path] = result
 
     del model_eval
     del ce
-    del dt
     del ckpt
 
     gc.collect()
@@ -318,29 +294,68 @@ def evaluate_official_checkpoint(path, label):
 
 
 # ============================================================
-# 7. EVALUATE SELECTED CHECKPOINT
+# EVALUATE FIXED 160K FIRST
 # ============================================================
 
 print("=" * 70)
-print("STEP 33 — OFFICIAL COCO EVALUATION")
+print("STEP 33 — B1 OFFICIAL COCOeval")
 print("=" * 70)
 
-step33_result = evaluate_official_checkpoint(
-    BEST_CHECKPOINT,
-    "V1.2_SELECTED"
+step33_160k_result = evaluate_official_checkpoint(
+    milestone30(20),
+    "B1_FIXED_160K"
 )
 
-for key, value in step33_result["metrics"].items():
-    print(
-        f"{key:18s}: {100*value:.4f}%"
+# If best is epoch 20, weights are identical.
+# Avoid a redundant full evaluation.
+if int(checkpoint["epoch"]) == 20:
+    step33_result = dict(step33_160k_result)
+    step33_result["label"] = "B1_BEST_EPOCH20"
+    step33_result["checkpoint"] = BEST_CHECKPOINT
+else:
+    step33_result = evaluate_official_checkpoint(
+        BEST_CHECKPOINT,
+        "B1_BEST"
     )
 
-print("\nAP PER IoU")
 
-for key, value in step33_result["AP_by_IoU"].items():
-    print(
-        key,
-        f"{100*value:.4f}%"
-    )
+def print_official_result(result):
+    print("\n" + "=" * 55)
+    print(result["label"])
+    print("=" * 55)
 
-print("STEP 33 PASSED — NO TRAINING")
+    print("Epoch      :", result["epoch"])
+    print("Images     :", result["images"])
+    print("Detections :", result["detections"])
+
+    print("\nALL 80 CLASSES")
+
+    for name, value in result["metrics"].items():
+        if value is not None:
+            print(
+                f"{name:20s}: {100 * value:.4f}%"
+            )
+
+    print("\nPERSON CLASS")
+
+    for name, value in result["person_metrics"].items():
+        if value is not None:
+            print(
+                f"{name:20s}: {100 * value:.4f}%"
+            )
+
+    print("\nAP BY IoU")
+
+    for name, value in result["AP_by_IoU"].items():
+        if value is not None:
+            print(
+                f"IoU {name}: {100 * value:.4f}%"
+            )
+
+
+print_official_result(step33_160k_result)
+
+if int(checkpoint["epoch"]) != 20:
+    print_official_result(step33_result)
+
+print("\nSTEP 33 PASSED — NO TRAINING")
