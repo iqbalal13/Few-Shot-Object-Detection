@@ -1,47 +1,37 @@
-
 # ============================================================
 # STEP 4 — EXPERIMENT B1 CONFIGURATION
-# GAUSSIAN RADIUS V1.3 / BASELINE MASKED L1 / FRESH 160K
+# GAUSSIAN RADIUS V1.3 / MASKED L1 WH / FRESH 160K
 # ============================================================
 
 import os
 
 CONFIG = {
-    # --------------------------------------------------------
-    # 1. EXPERIMENT IDENTITY
-    # --------------------------------------------------------
     "experiment_name": (
-        "CenterNet_COCO80_V13_B1_MASKEDL1_FRESH_160K_BS8"
+        "CenterNet_COCO80_B1_GAUSSIAN_V13_FRESH_160K_BS8"
     ),
 
-    # --------------------------------------------------------
-    # 2. MODEL ARCHITECTURE — UNCHANGED
-    # --------------------------------------------------------
+    # Model
     "backbone": "resnet101",
     "backbone_pretrained": True,
     "num_classes": 80,
     "input_size": 640,
     "output_stride": 4,
 
-    # --------------------------------------------------------
-    # 3. DATALOADER — UNCHANGED
-    # --------------------------------------------------------
+    # DataLoader
     "batch_size": 8,
     "num_workers": 8,
     "persistent_workers": True,
     "prefetch_factor": 4,
+    "encoded_num_workers": 4,
+    "encoded_prefetch_factor": 2,
 
-    # --------------------------------------------------------
-    # 4. OPTIMIZER — UNCHANGED
-    # --------------------------------------------------------
+    # Optimizer
     "learning_rate": 1e-4,
     "weight_decay": 1e-4,
     "grad_clip_norm": 10.0,
     "precision": "bfloat16",
 
-    # --------------------------------------------------------
-    # 5. SOURCE TRAINING — UNCHANGED
-    # --------------------------------------------------------
+    # Source training
     "source_epochs": 20,
     "source_images_total": 160000,
     "source_images_per_epoch": 8000,
@@ -49,61 +39,49 @@ CONFIG = {
     "source_sampling_policy": "class-balanced-multiclass",
     "source_manifest_seed_offset": 3000,
 
-    # --------------------------------------------------------
-    # 6. EXPERIMENT B1 — ONLY GAUSSIAN RADIUS CHANGES
-    # --------------------------------------------------------
+    # Experiment B1
     "train_horizontal_flip_p": 0.0,
-
     "gaussian_radius_mode": "v1_3_corrected",
     "gaussian_min_overlap": 0.7,
 
-    "best_checkpoint_metric": "official_COCO_mAP_50_95",
-
-    # --------------------------------------------------------
-    # 7. WH LOSS — ORIGINAL BASELINE
-    # --------------------------------------------------------
+    # Baseline WH loss, NOT A2 hybrid
     "wh_loss_type": "masked_l1",
 
-    # Retained for compatibility with the existing loss API.
-    # These parameters are INACTIVE when wh_loss_type
-    # is "masked_l1".
+    # Keep A2 parameters for metadata compatibility;
+    # they are NOT used when wh_loss_type is masked_l1.
     "wh_absolute_fraction": 0.75,
     "wh_relative_fraction": 0.25,
     "wh_relative_eps": 2.0,
     "wh_relative_beta": 0.20,
     "wh_relative_scale": 10.0,
 
-    # --------------------------------------------------------
-    # 8. ENGINEERING — UNCHANGED
-    # --------------------------------------------------------
-    "encoded_num_workers": 4,
-    "encoded_prefetch_factor": 2,
+    # Original loss weights
+    "hm_loss_weight": 1.0,
+    "wh_loss_weight": 0.1,
+    "offset_loss_weight": 1.0,
+
+    # Checkpoint selection
+    "best_checkpoint_metric": "official_COCO_mAP_50_95",
+
+    # Engineering
     "use_fused_adamw": False,
     "use_channels_last": False,
-
     "run_engineering_sanity": False,
     "run_tiny_overfit_diagnostic": False,
     "debug_finite_checks": False,
     "progress_every": 100,
 
-    # --------------------------------------------------------
-    # 9. EVALUATION — UNCHANGED
-    # --------------------------------------------------------
+    # Evaluation
     "score_threshold": 0.50,
     "iou_threshold": 0.50,
+
+    # Reproducibility
     "seed": SEED,
 
-    # --------------------------------------------------------
-    # 10. PATHS
-    # --------------------------------------------------------
+    # Paths
     "data_root": "/content/coco",
     "checkpoint_root": "/content/checkpoints_centernet",
 }
-
-
-# ============================================================
-# DATASET PATHS
-# ============================================================
 
 CONFIG["train_images"] = os.path.join(
     CONFIG["data_root"], "train2017"
@@ -125,30 +103,18 @@ CONFIG["val_annotations"] = os.path.join(
     "instances_val2017.json"
 )
 
-
-os.makedirs(
-    CONFIG["data_root"],
-    exist_ok=True
-)
-
-os.makedirs(
-    CONFIG["checkpoint_root"],
-    exist_ok=True
-)
-
+os.makedirs(CONFIG["data_root"], exist_ok=True)
+os.makedirs(CONFIG["checkpoint_root"], exist_ok=True)
 
 # ============================================================
-# CONFIGURATION VALIDATION
+# EXPERIMENT LOCK
 # ============================================================
 
-# Architecture
-assert CONFIG["backbone"] == "resnet101"
 assert CONFIG["num_classes"] == 80
 assert CONFIG["input_size"] == 640
 assert CONFIG["output_stride"] == 4
 assert CONFIG["batch_size"] == 8
 
-# Training budget
 assert CONFIG["source_epochs"] == 20
 assert CONFIG["source_images_total"] == 160000
 assert CONFIG["source_images_per_epoch"] == 8000
@@ -161,71 +127,43 @@ assert (
 )
 
 assert (
-    CONFIG["source_images_per_class_per_epoch"]
-    * CONFIG["num_classes"]
+    CONFIG["num_classes"]
+    * CONFIG["source_images_per_class_per_epoch"]
     == CONFIG["source_images_per_epoch"]
 )
 
-# Source sampling and augmentation
-assert (
-    CONFIG["source_sampling_policy"]
-    == "class-balanced-multiclass"
-)
-
-assert CONFIG["source_manifest_seed_offset"] == 3000
 assert CONFIG["train_horizontal_flip_p"] == 0.0
 
-# B1 experiment integrity
-assert CONFIG["gaussian_radius_mode"] == "v1_3_corrected"
+assert (
+    CONFIG["gaussian_radius_mode"]
+    == "v1_3_corrected"
+)
+
 assert CONFIG["gaussian_min_overlap"] == 0.7
 
-# WH must remain the original baseline loss.
 assert CONFIG["wh_loss_type"] == "masked_l1"
 
-# Retained inactive parameters
-assert CONFIG["wh_relative_eps"] > 0
-assert CONFIG["wh_relative_beta"] > 0
-assert CONFIG["wh_relative_scale"] > 0
+assert CONFIG["hm_loss_weight"] == 1.0
+assert CONFIG["wh_loss_weight"] == 0.1
+assert CONFIG["offset_loss_weight"] == 1.0
 
-# Engineering flags
-assert CONFIG["run_tiny_overfit_diagnostic"] is False
 assert CONFIG["run_engineering_sanity"] is False
-
-# Experiment identity
-assert "B1" in CONFIG["experiment_name"]
-assert "V13" in CONFIG["experiment_name"]
-assert "MASKEDL1" in CONFIG["experiment_name"]
-assert "FRESH_160K" in CONFIG["experiment_name"]
-
+assert CONFIG["run_tiny_overfit_diagnostic"] is False
 
 # ============================================================
-# PRINT EXPERIMENT CONFIGURATION
+# SUMMARY
 # ============================================================
 
 print("=" * 70)
-print("STEP 4 — EXPERIMENT B1 / GAUSSIAN V1.3 / FRESH 160K")
+print("STEP 4 — EXPERIMENT B1 CONFIGURATION")
 print("=" * 70)
 
 for key, value in CONFIG.items():
-    print(f"{key:34s}: {value}")
+    print(f"{key:36s}: {value}")
 
-print()
 print("=" * 70)
-print("B1 EXPERIMENT LOCK")
-print("=" * 70)
-
-print("Experiment       :", CONFIG["experiment_name"])
-print("Gaussian radius  :", CONFIG["gaussian_radius_mode"])
-print("Min overlap      :", CONFIG["gaussian_min_overlap"])
-print("WH loss          :", CONFIG["wh_loss_type"])
-print("Backbone         :", CONFIG["backbone"])
-print("Input size       :", CONFIG["input_size"])
-print("Output stride    :", CONFIG["output_stride"])
-print("Training images  :", CONFIG["source_images_total"])
-print("Source epochs    :", CONFIG["source_epochs"])
-print("Batch size       :", CONFIG["batch_size"])
-print("Seed             :", CONFIG["seed"])
-
-print()
-print("STEP 4 PASSED — B1 CONFIGURATION READY")
-print("NO TRAINING EXECUTED")
+print("Experiment : B1 Gaussian Radius V1.3")
+print("WH loss    : Original masked L1")
+print("Training   : Fresh 160K")
+print("Neck       : Original deconvolution-only")
+print("STEP 4 PASSED")
