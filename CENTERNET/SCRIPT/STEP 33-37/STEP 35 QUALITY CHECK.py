@@ -1,302 +1,312 @@
 
 # ============================================================
-# STEP 35 QUALITY CHECK 2/4
-# GAUSSIAN RADIUS AUDIT — V1.2 VS V1.3
-# NO TRAINING / NO WEIGHT MODIFICATION
+# STEP 35 — QC2: GAUSSIAN RADIUS V1.2 VS V1.3
+# B1 COMPATIBLE / DATA AUDIT ONLY / NO TRAINING
 # ============================================================
 
-import math
-import json
 import os
-from collections import Counter
-
+import json
+import math
 import numpy as np
 
+# ============================================================
+# 1. VERIFY B1 CONFIG
+# ============================================================
+
+assert CONFIG["experiment_name"] == (
+    "CenterNet_COCO80_B1_V13_ON_A2_FRESH_160K_BS8"
+)
+
+assert CONFIG["gaussian_radius_mode"] == "v1_3_corrected"
+assert CONFIG["gaussian_min_overlap"] == 0.7
+assert CONFIG["wh_loss_type"] == "hybrid_abs_relative"
+
 assert len(val_dataset) == 5000
+assert not val_dataset.augment
+
+print("=" * 70)
+print("STEP 35 — QC2 GAUSSIAN V1.2 VS V1.3")
+print("Active mode:", CONFIG["gaussian_radius_mode"])
+print("=" * 70)
 
 
 # ============================================================
-# 1. ORIGINAL V1.2 FORMULA
+# 2. INDEPENDENT GAUSSIAN RADIUS CALCULATION
 # ============================================================
 
-def q2_v12_radius(h, w, o=0.7):
-    h, w = float(h), float(w)
+def q2_radius(h, w, version, overlap=0.7):
+
+    h = float(h)
+    w = float(w)
+    o = float(overlap)
+
+    assert h > 0 and w > 0
+    assert 0 < o < 1
 
     a1 = 1.0
     b1 = h + w
-    c1 = w * h * (1 - o) / (1 + o)
+    c1 = h*w*(1-o)/(1+o)
 
     a2 = 4.0
-    b2 = 2 * (h + w)
-    c2 = (1 - o) * w * h
+    b2 = 2*(h+w)
+    c2 = (1-o)*h*w
 
-    a3 = 4 * o
-    b3 = -2 * o * (h + w)
-    c3 = (o - 1) * w * h
+    a3 = 4*o
+    b3 = -2*o*(h+w)
+    c3 = (o-1)*h*w
 
-    r1 = (
-        b1 + math.sqrt(max(0, b1*b1 - 4*a1*c1))
-    ) / 2
+    d1 = math.sqrt(max(0., b1*b1-4*a1*c1))
+    d2 = math.sqrt(max(0., b2*b2-4*a2*c2))
+    d3 = math.sqrt(max(0., b3*b3-4*a3*c3))
 
-    r2 = (
-        b2 + math.sqrt(max(0, b2*b2 - 4*a2*c2))
-    ) / 2
+    if version == "v12":
 
-    r3 = (
-        b3 + math.sqrt(max(0, b3*b3 - 4*a3*c3))
-    ) / (2 * a3)
+        r1 = (b1+d1)/(2*a1)
+        r2 = (b2+d2)/(2*a2)
+        mode = "v1_2_original"
 
-    return max(0.0, min(r1, r2, r3))
+    elif version == "v13":
 
+        r1 = (b1-d1)/(2*a1)
+        r2 = (b2-d2)/(2*a2)
+        mode = "v1_3_corrected"
 
-# ============================================================
-# 2. V1.3 FORMULA
-# ============================================================
+    else:
+        raise ValueError(version)
 
-def q2_v13_radius(h, w, o=0.7):
-    h, w = float(h), float(w)
+    r3 = (b3+d3)/(2*a3)
 
-    a1 = 1.0
-    b1 = h + w
-    c1 = w * h * (1 - o) / (1 + o)
+    radius = max(0, int(min(r1, r2, r3)))
 
-    a2 = 4.0
-    b2 = 2 * (h + w)
-    c2 = (1 - o) * w * h
+    # Cross-check against Step 15 implementation
+    actual = int(gaussian_radius(
+        h,
+        w,
+        min_overlap=o,
+        mode=mode
+    ))
 
-    a3 = 4 * o
-    b3 = -2 * o * (h + w)
-    c3 = (o - 1) * w * h
-
-    r1 = (
-        b1 - math.sqrt(max(0, b1*b1 - 4*a1*c1))
-    ) / (2 * a1)
-
-    r2 = (
-        b2 - math.sqrt(max(0, b2*b2 - 4*a2*c2))
-    ) / (2 * a2)
-
-    r3 = (
-        b3 + math.sqrt(max(0, b3*b3 - 4*a3*c3))
-    ) / (2 * a3)
-
-    return max(0.0, min(r1, r2, r3))
-
-
-# ============================================================
-# 3. SCAN COCO-VAL ANNOTATIONS
-# ============================================================
-
-q2_coco = val_dataset.coco
-q2_rows = []
-q2_overflow = 0
-
-for q2_id in val_dataset.image_ids:
-
-    im = q2_coco.imgs[int(q2_id)]
-
-    scale = min(
-        640 / im["width"],
-        640 / im["height"]
+    assert radius == actual, (
+        f"Step 15 radius mismatch: "
+        f"{version}, QC2={radius}, Step15={actual}"
     )
 
-    pad_x = (
-        640 - round(im["width"] * scale)
-    ) // 2
+    return radius
 
-    pad_y = (
-        640 - round(im["height"] * scale)
-    ) // 2
 
-    ann_ids = q2_coco.getAnnIds(
-        imgIds=[int(q2_id)],
+assert q2_radius(12, 12, "v12") == 1
+assert q2_radius(12, 12, "v13") == 0
+
+
+# ============================================================
+# 3. AUDIT FULL COCO-VAL
+# ============================================================
+
+coco35 = val_dataset.coco
+
+r35 = []
+overflow35 = 0
+invalid35 = 0
+images35 = 0
+
+INPUT35 = CONFIG["input_size"]
+STRIDE35 = CONFIG["output_stride"]
+MAX35 = CONFIG["max_objects"]
+
+assert INPUT35 == 640
+assert STRIDE35 == 4
+assert MAX35 == 128
+
+for image_id in val_dataset.image_ids:
+
+    image_id = int(image_id)
+    meta = coco35.imgs[image_id]
+
+    original_w = meta["width"]
+    original_h = meta["height"]
+
+    scale = min(
+        INPUT35 / original_w,
+        INPUT35 / original_h
+    )
+
+    resized_w = int(round(original_w * scale))
+    resized_h = int(round(original_h * scale))
+
+    px = (INPUT35 - resized_w) // 2
+    py = (INPUT35 - resized_h) // 2
+
+    accepted = 0
+
+    ann_ids = coco35.getAnnIds(
+        imgIds=[image_id],
         iscrowd=False
     )
 
-    annotations = q2_coco.loadAnns(ann_ids)
-
-    accepted = 0
+    annotations = coco35.loadAnns(ann_ids)
 
     for ann in annotations:
 
         x, y, w, h = ann["bbox"]
 
         if w <= 1 or h <= 1:
+            invalid35 += 1
             continue
 
         if ann["category_id"] not in (
             val_dataset.cat_id_to_contiguous
         ):
+            invalid35 += 1
             continue
 
-        x1 = max(
-            0.0,
-            min(639.0, x * scale + pad_x)
-        )
+        x1 = max(0., min(639., x*scale+px))
+        x2 = max(0., min(639., (x+w)*scale+px))
 
-        y1 = max(
-            0.0,
-            min(639.0, y * scale + pad_y)
-        )
+        y1 = max(0., min(639., y*scale+py))
+        y2 = max(0., min(639., (y+h)*scale+py))
 
-        x2 = max(
-            0.0,
-            min(639.0, (x+w)*scale + pad_x)
-        )
-
-        y2 = max(
-            0.0,
-            min(639.0, (y+h)*scale + pad_y)
-        )
-
-        W = x2 - x1
-        H = y2 - y1
+        W = x2-x1
+        H = y2-y1
 
         if W <= 1 or H <= 1:
+            invalid35 += 1
             continue
 
-        cx = (x1 + x2) / 8.0
-        cy = (y1 + y2) / 8.0
+        cx = (x1+x2) / (2*STRIDE35)
+        cy = (y1+y2) / (2*STRIDE35)
 
         if not (
             0 <= cx < 160
             and 0 <= cy < 160
         ):
+            invalid35 += 1
             continue
 
-        if accepted >= 128:
-            q2_overflow += 1
+        if accepted >= MAX35:
+            overflow35 += 1
             continue
 
         accepted += 1
 
-        # Bounding box dimensions in feature-map cells
-        feature_w = W / 4.0
-        feature_h = H / 4.0
-
-        radius12 = int(
-            q2_v12_radius(feature_h, feature_w)
-        )
-
-        radius13 = int(
-            q2_v13_radius(feature_h, feature_w)
-        )
-
-        area = float(
-            ann.get("area", w*h)
-        )
+        # Original COCO area categories
+        area = ann.get("area", w*h)
 
         if area < 32**2:
-            size = "small"
+            group = "small"
         elif area < 96**2:
-            size = "medium"
+            group = "medium"
         else:
-            size = "large"
+            group = "large"
 
-        q2_rows.append(
-            (radius12, radius13, size)
+        r12 = q2_radius(
+            H/STRIDE35,
+            W/STRIDE35,
+            "v12",
+            CONFIG["gaussian_min_overlap"]
         )
 
+        r13 = q2_radius(
+            H/STRIDE35,
+            W/STRIDE35,
+            "v13",
+            CONFIG["gaussian_min_overlap"]
+        )
+
+        assert r13 <= r12
+
+        r35.append((r12, r13, group))
+
+    images35 += 1
+
 
 # ============================================================
-# 4. PRINT DISTRIBUTION
+# 4. STATISTICS
 # ============================================================
 
-assert q2_rows
+assert images35 == 5000
+assert len(r35) > 0
 
-print("=" * 75)
-print("QUALITY CHECK 2 — GAUSSIAN RADIUS DISTRIBUTION")
-print("=" * 75)
+result35 = {
+    "experiment_name": CONFIG["experiment_name"],
+    "active_radius_mode": CONFIG["gaussian_radius_mode"],
+    "images": images35,
+    "n_objects": len(r35),
+    "overflow_excluded": overflow35,
+    "invalid_excluded": invalid35,
+    "groups": {}
+}
 
-print("Objects evaluated:", len(q2_rows))
-print("Overflow excluded:", q2_overflow)
+for group in ("all", "small", "medium", "large"):
 
-for size in [
-    "all", "small", "medium", "large"
-]:
-
-    rows = [
-        r for r in q2_rows
-        if size == "all" or r[2] == size
+    sample = [
+        (a, b)
+        for a, b, size_group in r35
+        if group == "all" or size_group == group
     ]
 
-    if not rows:
+    if not sample:
         continue
 
-    values = np.array(
-        [[r[0], r[1]] for r in rows],
-        dtype=np.float64
-    )
+    values = np.asarray(sample, dtype=np.int32)
 
     v12 = values[:, 0]
     v13 = values[:, 1]
 
-    print(f"\nObject size: {size}")
-    print("Count:", len(rows))
+    stats = {
+        "n": len(sample),
+        "v12_radius0_pct":
+            float(100*np.mean(v12 == 0)),
+        "v13_radius0_pct":
+            float(100*np.mean(v13 == 0)),
+        "changed_pct":
+            float(100*np.mean(v12 != v13)),
+        "v12_mean_radius":
+            float(np.mean(v12)),
+        "v13_mean_radius":
+            float(np.mean(v13))
+    }
+
+    result35["groups"][group] = stats
 
     print(
-        "V1.2 radius zero: "
-        f"{100 * np.mean(v12 == 0):.3f}%"
-    )
-
-    print(
-        "V1.3 radius zero: "
-        f"{100 * np.mean(v13 == 0):.3f}%"
-    )
-
-    print(
-        "Changed radius: "
-        f"{100 * np.mean(v12 != v13):.3f}%"
-    )
-
-    print(
-        f"Mean radius V1.2: {v12.mean():.3f}"
-    )
-
-    print(
-        f"Mean radius V1.3: {v13.mean():.3f}"
+        f"{group:7s} | "
+        f"GT={stats['n']:6d} | "
+        f"changed={stats['changed_pct']:.2f}% | "
+        f"radius {stats['v12_mean_radius']:.3f}"
+        f" -> {stats['v13_mean_radius']:.3f} | "
+        f"V1.3 R0={stats['v13_radius0_pct']:.2f}%"
     )
 
 
 # ============================================================
-# 5. SAVE DIAGNOSTIC
+# 5. SAVE — SEPARATE B1 AUDIT FILE
 # ============================================================
 
-q2_save_dir = (
-    "/content/drive/MyDrive/"
-    "CenterNet_Quality_Diagnostics"
+QC35_OUT = os.path.join(
+    FULL_CHECKPOINT_DIR,
+    "quality_checks_B1"
 )
 
-os.makedirs(q2_save_dir, exist_ok=True)
+os.makedirs(QC35_OUT, exist_ok=True)
 
-q2_result = {
-    "objects": len(q2_rows),
-    "overflow_excluded": q2_overflow,
-    "radius_v12": dict(
-        Counter(r[0] for r in q2_rows)
-    ),
-    "radius_v13": dict(
-        Counter(r[1] for r in q2_rows)
-    ),
-    "changed_pct": float(
-        100 * sum(
-            a != b for a, b, _ in q2_rows
-        ) / len(q2_rows)
+QC35_FILE = os.path.join(
+    QC35_OUT,
+    "qc2_gaussian_v12_vs_v13_data_audit.json"
+)
+
+with open(QC35_FILE, "w", encoding="utf-8") as f:
+    json.dump(
+        result35,
+        f,
+        indent=2,
+        allow_nan=False
     )
-}
 
-q2_save_file = os.path.join(
-    q2_save_dir,
-    "quality_check_2_gaussian.json"
-)
-
-with open(
-    q2_save_file,
-    "w",
-    encoding="utf-8"
-) as f:
-    json.dump(q2_result, f, indent=2)
-
-print("\nQUALITY CHECK 2 COMPLETE")
-print("Results:", q2_save_file)
-print("No model weights modified.")
+print("=" * 70)
+print("STEP 35 PASSED")
+print("Images:", images35)
+print("Objects:", len(r35))
+print("Overflow excluded:", overflow35)
+print("Invalid excluded:", invalid35)
+print("Saved:", QC35_FILE)
+print("NO TRAINING / NO MODEL WEIGHT UPDATE")
