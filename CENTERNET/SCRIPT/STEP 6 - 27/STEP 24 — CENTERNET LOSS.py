@@ -1,9 +1,8 @@
 
 # ============================================================
-# STEP 24 — B1 ON A2: HYBRID WH LOSS
-# Gaussian V1.3: handled by Step 15-16
-# WH: A2 HYBRID ABSOLUTE + RELATIVE
-# HEATMAP AND OFFSET LOSS: UNCHANGED
+# STEP 24 — B1 ON A2 HYBRID WH LOSS
+# Gaussian V1.3 handled by Steps 15-16
+# WH loss remains identical to Experiment A2
 # ============================================================
 
 import torch
@@ -14,12 +13,9 @@ CONFIG["hm_loss_weight"] = 1.0
 CONFIG["wh_loss_weight"] = 0.1
 CONFIG["offset_loss_weight"] = 1.0
 
-assert CONFIG["gaussian_radius_mode"] == "v1_3_corrected"
-assert CONFIG["wh_loss_type"] == "hybrid_abs_relative"
-
 
 # ============================================================
-# 1. ORIGINAL CENTERNET FOCAL LOSS
+# 1. CENTERNET MODIFIED FOCAL LOSS — UNCHANGED
 # ============================================================
 
 def centernet_focal_loss(prediction_logits, target):
@@ -67,7 +63,7 @@ def centernet_focal_loss(prediction_logits, target):
 
 
 # ============================================================
-# 2. FEATURE GATHERING
+# 2. FEATURE GATHERING — UNCHANGED
 # ============================================================
 
 def transpose_and_gather_feature(feature, indices):
@@ -89,7 +85,7 @@ def transpose_and_gather_feature(feature, indices):
 
 
 # ============================================================
-# 3. MASKED ABSOLUTE L1
+# 3. MASKED L1 — ABSOLUTE COMPONENT + OFFSET
 # ============================================================
 
 def masked_l1_loss(prediction, target, mask):
@@ -145,7 +141,7 @@ def build_batch_centernet_targets(targets, device):
 
 
 # ============================================================
-# 5. RELATIVE SMOOTH L1 — FROM A1/A2
+# 5. RELATIVE SMOOTH L1 — ORIGINAL A2 COMPONENT
 # ============================================================
 
 def masked_relative_smooth_l1_loss(
@@ -200,7 +196,7 @@ def masked_relative_smooth_l1_loss(
 
 
 # ============================================================
-# 6. CENTERNET LOSS — B1 ON A2
+# 6. B1 LOSS — PRESERVE A2 75:25 HYBRID
 # ============================================================
 
 class CenterNetLoss(nn.Module):
@@ -246,29 +242,21 @@ class CenterNetLoss(nn.Module):
         )
 
         assert self.wh_loss_type == "hybrid_abs_relative"
-
         assert self.wh_absolute_fraction > 0
         assert self.wh_relative_fraction > 0
 
         assert abs(
             self.wh_absolute_fraction
-            + self.wh_relative_fraction - 1.0
+            + self.wh_relative_fraction
+            - 1.0
         ) < 1e-12
 
     def forward(self, outputs, targets):
-
-        # ----------------------------------------------------
-        # HEATMAP — UNCHANGED CENTERNET FOCAL LOSS
-        # ----------------------------------------------------
 
         heatmap_loss = centernet_focal_loss(
             outputs["heatmap"],
             targets["heatmap"]
         )
-
-        # ----------------------------------------------------
-        # GATHER WH AND OFFSET AT GT CENTERS
-        # ----------------------------------------------------
 
         predicted_wh = transpose_and_gather_feature(
             outputs["wh"],
@@ -280,20 +268,14 @@ class CenterNetLoss(nn.Module):
             targets["indices"]
         )
 
-        # ----------------------------------------------------
-        # ABSOLUTE WH LOSS — BASELINE COMPONENT
-        # ----------------------------------------------------
-
+        # A2: absolute WH regression
         wh_abs = masked_l1_loss(
             predicted_wh,
             targets["wh"],
             targets["mask"]
         )
 
-        # ----------------------------------------------------
-        # RELATIVE WH LOSS — A1 COMPONENT
-        # ----------------------------------------------------
-
+        # A2: relative WH regression
         wh_rel = masked_relative_smooth_l1_loss(
             predicted_wh,
             targets["wh"],
@@ -303,28 +285,18 @@ class CenterNetLoss(nn.Module):
             scale=self.wh_relative_scale
         )
 
-        # ----------------------------------------------------
-        # A2 HYBRID — 75% ABSOLUTE + 25% RELATIVE
-        # ----------------------------------------------------
-
+        # IMPORTANT:
+        # Same A2 hybrid formulation, unchanged for B1.
         wh_loss = (
             self.wh_absolute_fraction * wh_abs
             + self.wh_relative_fraction * wh_rel
         )
-
-        # ----------------------------------------------------
-        # OFFSET — UNCHANGED MASKED L1
-        # ----------------------------------------------------
 
         offset_loss = masked_l1_loss(
             predicted_offset,
             targets["offset"],
             targets["mask"]
         )
-
-        # ----------------------------------------------------
-        # TOTAL LOSS
-        # ----------------------------------------------------
 
         total_loss = (
             self.hm_weight * heatmap_loss
@@ -341,34 +313,73 @@ class CenterNetLoss(nn.Module):
 
 
 # ============================================================
-# 7. INITIALIZE CRITERION
+# 7. INSTANTIATE B1 CRITERION
 # ============================================================
 
 criterion = CenterNetLoss(
     hm_weight=CONFIG["hm_loss_weight"],
     wh_weight=CONFIG["wh_loss_weight"],
     offset_weight=CONFIG["offset_loss_weight"],
+
     wh_loss_type=CONFIG["wh_loss_type"],
-    wh_absolute_fraction=CONFIG["wh_absolute_fraction"],
-    wh_relative_fraction=CONFIG["wh_relative_fraction"],
-    wh_relative_eps=CONFIG["wh_relative_eps"],
-    wh_relative_beta=CONFIG["wh_relative_beta"],
-    wh_relative_scale=CONFIG["wh_relative_scale"]
+
+    wh_absolute_fraction=CONFIG[
+        "wh_absolute_fraction"
+    ],
+
+    wh_relative_fraction=CONFIG[
+        "wh_relative_fraction"
+    ],
+
+    wh_relative_eps=CONFIG[
+        "wh_relative_eps"
+    ],
+
+    wh_relative_beta=CONFIG[
+        "wh_relative_beta"
+    ],
+
+    wh_relative_scale=CONFIG[
+        "wh_relative_scale"
+    ]
 ).to(device)
 
 
 # ============================================================
-# 8. GRADIENT SANITY TEST
+# 8. CONFIGURATION SANITY
+# ============================================================
+
+assert CONFIG["gaussian_radius_mode"] == "v1_3_corrected"
+
+assert criterion.wh_loss_type == "hybrid_abs_relative"
+
+assert abs(
+    criterion.wh_absolute_fraction - 0.75
+) < 1e-12
+
+assert abs(
+    criterion.wh_relative_fraction - 0.25
+) < 1e-12
+
+assert criterion.wh_relative_eps == 2.0
+assert criterion.wh_relative_beta == 0.20
+assert criterion.wh_relative_scale == 10.0
+
+
+# ============================================================
+# 9. GRADIENT SANITY — NO TRAINING
 # ============================================================
 
 test_prediction = torch.tensor(
-    [[[3.0, 2.0], [100000.0, 100000.0]]],
+    [[[3.0, 2.0],
+      [100000.0, 100000.0]]],
     device=device,
     requires_grad=True
 )
 
 test_target = torch.tensor(
-    [[[2.0, 2.0], [0.0, 0.0]]],
+    [[[2.0, 2.0],
+      [0.0, 0.0]]],
     device=device
 )
 
@@ -397,7 +408,20 @@ test_hybrid = (
     + CONFIG["wh_relative_fraction"] * test_rel
 )
 
+assert torch.isfinite(test_abs)
+assert torch.isfinite(test_rel)
 assert torch.isfinite(test_hybrid)
+
+expected = (
+    0.75 * test_abs
+    + 0.25 * test_rel
+)
+
+assert torch.allclose(
+    test_hybrid,
+    expected,
+    atol=1e-7
+)
 
 test_hybrid.backward()
 
@@ -416,33 +440,26 @@ assert (
 
 
 # ============================================================
-# 9. CONFIGURATION VERIFICATION
+# 10. FINAL REPORT
 # ============================================================
 
-assert criterion.wh_loss_type == "hybrid_abs_relative"
-
-assert criterion.wh_absolute_fraction == 0.75
-assert criterion.wh_relative_fraction == 0.25
-
-assert criterion.wh_relative_eps == 2.0
-assert criterion.wh_relative_beta == 0.20
-assert criterion.wh_relative_scale == 10.0
-
-assert criterion.hm_weight == 1.0
-assert criterion.wh_weight == 0.1
-assert criterion.offset_weight == 1.0
-
 print("=" * 70)
-print("STEP 24 — B1 ON A2 HYBRID WH LOSS")
+print("STEP 24 — B1 / A2 HYBRID WH LOSS")
 print("=" * 70)
 
-print("Gaussian mode :", CONFIG["gaussian_radius_mode"])
-print("WH loss       :", criterion.wh_loss_type)
-print("Absolute frac :", criterion.wh_absolute_fraction)
-print("Relative frac :", criterion.wh_relative_fraction)
-print("Relative eps  :", criterion.wh_relative_eps)
-print("Relative beta :", criterion.wh_relative_beta)
-print("Relative scale:", criterion.wh_relative_scale)
+print("Gaussian mode   :", CONFIG["gaussian_radius_mode"])
+print("Heatmap loss    : CenterNet modified focal loss")
+print("WH loss         :", criterion.wh_loss_type)
+print("WH absolute     :", criterion.wh_absolute_fraction)
+print("WH relative     :", criterion.wh_relative_fraction)
+print("Relative eps    :", criterion.wh_relative_eps)
+print("Relative beta   :", criterion.wh_relative_beta)
+print("Relative scale  :", criterion.wh_relative_scale)
+print("Offset loss     : Masked L1")
+
+print("Heatmap weight  :", criterion.hm_weight)
+print("WH outer weight :", criterion.wh_weight)
+print("Offset weight   :", criterion.offset_weight)
 
 print("Gradient sanity: PASSED")
 print("STEP 24 PASSED — NO TRAINING")
