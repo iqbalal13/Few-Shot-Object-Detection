@@ -1,18 +1,10 @@
 
-# ============================================================
-# STEP 16 — CENTERNET TARGET GENERATOR / B1
-# ONLY HEATMAP RADIUS MODE CHANGES
-# ============================================================
-
-print("=" * 70)
-print("STEP 16 — B1 CENTERNET TARGET GENERATOR")
-print("=" * 70)
+# STEP 16 — A3 COLLISION-AWARE NEIGHBOR TARGETS
+import torch
 
 CONFIG["max_objects"] = 128
-
 MAX_OBJECTS = CONFIG["max_objects"]
 NUM_CLASSES = CONFIG["num_classes"]
-
 
 def build_centernet_target(
     target,
@@ -23,184 +15,148 @@ def build_centernet_target(
     max_objects=MAX_OBJECTS,
     gaussian_radius_mode=None
 ):
-    if gaussian_radius_mode is None:
-        gaussian_radius_mode = CONFIG["gaussian_radius_mode"]
+    mode = gaussian_radius_mode or CONFIG["gaussian_radius_mode"]
 
-    heatmap = torch.zeros(
-        (num_classes, output_height, output_width),
+    hm = torch.zeros(
+        num_classes,output_height,output_width,
         dtype=torch.float32
     )
+    wh = torch.zeros(max_objects,2,dtype=torch.float32)
+    offset = torch.zeros(max_objects,2,dtype=torch.float32)
+    indices = torch.zeros(max_objects,dtype=torch.long)
+    mask = torch.zeros(max_objects,dtype=torch.bool)
+    labels = torch.full((max_objects,),-1,dtype=torch.long)
+    neighbor_indices = torch.zeros(max_objects,8,dtype=torch.long)
+    neighbor_mask = torch.zeros(max_objects,8,dtype=torch.bool)
 
-    wh_target = torch.zeros(
-        (max_objects, 2),
-        dtype=torch.float32
-    )
+    accepted = []
+    blocking_boxes = []
+    n_candidates = 0
 
-    offset_target = torch.zeros(
-        (max_objects, 2),
-        dtype=torch.float32
-    )
+    for box,class_id in zip(target["boxes"],target["labels"]):
+        x1,y1,x2,y2 = map(float,box.tolist())
+        bw,bh = x2-x1,y2-y1
 
-    indices = torch.zeros(
-        (max_objects,),
-        dtype=torch.long
-    )
-
-    mask = torch.zeros(
-        (max_objects,),
-        dtype=torch.bool
-    )
-
-    labels = torch.full(
-        (max_objects,),
-        -1,
-        dtype=torch.long
-    )
-
-    boxes = target["boxes"]
-    class_labels = target["labels"]
-
-    object_index = 0
-    valid_candidate_objects = 0
-
-    for box, class_id in zip(boxes, class_labels):
-
-        x1, y1, x2, y2 = box.tolist()
-
-        width = x2 - x1
-        height = y2 - y1
-
-        if width <= 1 or height <= 1:
+        if bw<=1 or bh<=1:
             continue
 
-        center_x = (x1 + x2) / 2.0
-        center_y = (y1 + y2) / 2.0
+        cx = (x1+x2)/(2*output_stride)
+        cy = (y1+y2)/(2*output_stride)
+        w,h = bw/output_stride,bh/output_stride
 
-        center_x /= output_stride
-        center_y /= output_stride
-
-        width /= output_stride
-        height /= output_stride
-
-        if (
-            center_x < 0
-            or center_x >= output_width
-            or center_y < 0
-            or center_y >= output_height
+        if not (
+            0<=cx<output_width
+            and 0<=cy<output_height
         ):
             continue
 
-        valid_candidate_objects += 1
+        n_candidates += 1
 
-        if object_index >= max_objects:
+        blocking_boxes.append((
+            x1/output_stride,y1/output_stride,
+            x2/output_stride,y2/output_stride
+        ))
+
+        if len(accepted)>=max_objects:
             continue
 
-        center_int_x = int(center_x)
-        center_int_y = int(center_y)
+        ix,iy = int(cx),int(cy)
+        k = len(accepted)
 
-        center_int_x = min(
-            max(center_int_x, 0),
-            output_width-1
-        )
-
-        center_int_y = min(
-            max(center_int_y, 0),
-            output_height-1
-        )
-
-        # THE ONLY B1 TARGET ALGORITHM CHANGE
-        radius = gaussian_radius(
-            height,
-            width,
+        radius = max(0,int(gaussian_radius(
+            h,w,
             min_overlap=CONFIG["gaussian_min_overlap"],
-            mode=gaussian_radius_mode
+            mode=mode
+        )))
+
+        draw_gaussian(hm[int(class_id)],(ix,iy),radius)
+
+        wh[k] = torch.tensor((w,h),dtype=torch.float32)
+        offset[k] = torch.tensor(
+            (cx-ix,cy-iy),dtype=torch.float32
         )
+        indices[k] = iy*output_width+ix
+        labels[k] = int(class_id)
+        mask[k] = True
 
-        radius = max(0, int(radius))
+        accepted.append((
+            k,ix,iy,len(blocking_boxes)-1
+        ))
 
-        class_id = int(class_id.item())
+    radius = CONFIG["a3_neighbor_radius"]
+    assert radius == 1
 
-        draw_gaussian(
-            heatmap[class_id],
-            (center_int_x, center_int_y),
-            radius
-        )
-
-        wh_target[object_index] = torch.tensor(
-            [width, height],
-            dtype=torch.float32
-        )
-
-        offset_target[object_index] = torch.tensor(
-            [
-                center_x - center_int_x,
-                center_y - center_int_y
-            ],
-            dtype=torch.float32
-        )
-
-        indices[object_index] = (
-            center_int_y * output_width
-            + center_int_x
-        )
-
-        mask[object_index] = True
-        labels[object_index] = class_id
-
-        object_index += 1
-
-    return {
-        "heatmap": heatmap,
-        "wh": wh_target,
-        "offset": offset_target,
-        "indices": indices,
-        "mask": mask,
-        "labels": labels,
-        "num_objects": object_index,
-        "num_candidates": valid_candidate_objects,
-        "num_dropped": max(
-            0, valid_candidate_objects - object_index
-        ),
+    reserved_centers = {
+        (cx,cy) for _,cx,cy,_ in accepted
     }
 
+    directions = [
+        (dx,dy)
+        for dy in (-1,0,1)
+        for dx in (-1,0,1)
+        if dx or dy
+    ]
 
-sample_image, sample_target = train_dataset[0]
+    for k,cx,cy,box_id in accepted:
+        x1,y1,x2,y2 = blocking_boxes[box_id]
 
-centernet_target = build_centernet_target(
-    sample_target
-)
+        for j,(dx,dy) in enumerate(directions):
+            px,py = cx+dx,cy+dy
 
-assert centernet_target["heatmap"].shape == (
-    80, 160, 160
-)
-assert centernet_target["wh"].shape == (
-    MAX_OBJECTS, 2
-)
-assert centernet_target["offset"].shape == (
-    MAX_OBJECTS, 2
-)
-assert centernet_target["indices"].shape == (
-    MAX_OBJECTS,
-)
-assert centernet_target["mask"].shape == (
-    MAX_OBJECTS,
-)
+            if not (
+                0<=px<output_width
+                and 0<=py<output_height
+            ):
+                continue
 
-assert torch.isfinite(
-    centernet_target["heatmap"]
-).all()
+            if (px,py) in reserved_centers:
+                continue
+
+            # Center of the feature-map cell.
+            qx,qy = px+0.5,py+0.5
+
+            if not (
+                x1<=qx<=x2 and y1<=qy<=y2
+            ):
+                continue
+
+            owners = sum(
+                xl<=qx<=xr and yt<=qy<=yb
+                for xl,yt,xr,yb in blocking_boxes
+            )
+
+            if owners!=1:
+                continue
+
+            neighbor_indices[k,j] = py*output_width+px
+            neighbor_mask[k,j] = True
+
+    return {
+        "heatmap":hm,
+        "wh":wh,
+        "offset":offset,
+        "indices":indices,
+        "mask":mask,
+        "labels":labels,
+        "neighbor_indices":neighbor_indices,
+        "neighbor_mask":neighbor_mask,
+        "num_objects":len(accepted),
+        "num_candidates":n_candidates,
+        "num_dropped":n_candidates-len(accepted)
+    }
+
+sample_image,sample_target = train_dataset[0]
+centernet_target = build_centernet_target(sample_target)
+
+assert centernet_target["heatmap"].shape==(80,160,160)
+assert centernet_target["neighbor_mask"].shape==(128,8)
+
+assert not (
+    centernet_target["neighbor_mask"]
+    & ~centernet_target["mask"][:,None]
+).any()
 
 print(
-    "Gaussian mode:",
-    CONFIG["gaussian_radius_mode"]
+    "STEP 16 PASS — VALID NEIGHBORS:",
+    int(centernet_target["neighbor_mask"].sum())
 )
-print(
-    "Encoded objects:",
-    centernet_target["num_objects"]
-)
-print(
-    "Dropped objects:",
-    centernet_target["num_dropped"]
-)
-
-print("STEP 16 PASSED")
