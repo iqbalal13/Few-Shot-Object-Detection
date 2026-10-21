@@ -2,7 +2,8 @@
 # ============================================================
 # STEP 39 — QC6 / HEATMAP DISTANCE + WH BIAS
 # BASELINE VS A1 VS A2 — 160K
-# FIXED V1.2 RADIUS GROUPS / NO TRAINING
+# FIXED V1.2 RADIUS GROUPS
+# INFERENCE ONLY — NO TRAINING
 # ============================================================
 
 import os
@@ -12,20 +13,23 @@ import gc
 import numpy as np
 import torch
 
-PERSON39 = int(
-    val_dataset.cat_id_to_contiguous[1]
-)
+PERSON39 = int(val_dataset.cat_id_to_contiguous[1])
 
-# Keep historical populations consistent.
+# FIX: Historical grouping always uses V1.2.
 QC39_RADIUS_GROUP_MODE = "v1_2_original"
 
-assert (
-    CONFIG["gaussian_radius_mode"]
-    == "v1_3_corrected"
-)
+assert CONFIG["gaussian_radius_mode"] == "v1_3_corrected"
+
+assert set(QC_PATHS) == {
+    "Baseline_V12_160K",
+    "Experiment_A1_160K",
+    "Experiment_A2_160K"
+}
+
+assert len(val_dataset) == 5000
 
 print(
-    "QC6 radius grouping:",
+    "QC6 historical radius grouping:",
     QC39_RADIUS_GROUP_MODE
 )
 
@@ -106,6 +110,7 @@ def summarize39(rows):
     result["peak_coverage"] = {}
 
     for threshold in THRESH39:
+
         distances = np.asarray([
             row["distances"][str(threshold)]
             for row in rows
@@ -131,6 +136,7 @@ def summarize39(rows):
     result["wh"] = {}
 
     for dim in ("w", "h"):
+
         signed = np.asarray([
             row[f"signed_{dim}"]
             for row in rows
@@ -145,12 +151,14 @@ def summarize39(rows):
             f"signed_{dim}_cells"
         ] = stats39(signed)
 
-        result["wh"][f"rel_{dim}"] = (
-            stats39(relative)
-        )
+        result["wh"][
+            f"rel_{dim}"
+        ] = stats39(relative)
 
-        result["wh"][f"abs_rel_{dim}"] = (
-            stats39(np.abs(relative))
+        result["wh"][
+            f"abs_rel_{dim}"
+        ] = stats39(
+            np.abs(relative)
         )
 
         result["wh"][
@@ -181,12 +189,14 @@ def summarize39(rows):
 qc6 = {}
 
 for name, path in QC_PATHS.items():
+
     model = qc_load_model(path)
 
     records = []
     images_seen = 0
 
     with torch.inference_mode():
+
         for images, targets in qc_loader():
 
             with torch.amp.autocast(
@@ -208,6 +218,7 @@ for name, path in QC_PATHS.items():
             H, W = probability.shape[-2:]
 
             for b, target in enumerate(targets):
+
                 boxes, labels, gt_wh, center, ij = (
                     qc_valid_gt(target, H, W)
                 )
@@ -232,7 +243,7 @@ for name, path in QC_PATHS.items():
                 )
 
                 # --------------------------------------------
-                # Extract a 17x17 window around GT center
+                # Extract 17x17 window around GT center
                 # --------------------------------------------
 
                 patch_x = (
@@ -282,17 +293,19 @@ for name, path in QC_PATHS.items():
                 )
 
                 # --------------------------------------------
-                # Nearest peak at each confidence threshold
+                # Nearest local peak by threshold
                 # --------------------------------------------
 
                 nearest = {}
 
                 for threshold in THRESH39:
+
                     if threshold == 0.0:
                         active = (
                             (peak_patch > 0)
                             & within_image
                         )
+
                     else:
                         active = (
                             (peak_patch >= threshold)
@@ -317,7 +330,7 @@ for name, path in QC_PATHS.items():
                     )
 
                 # --------------------------------------------
-                # Object grouping by original image area
+                # Group objects by original bbox area
                 # --------------------------------------------
 
                 scale = float(
@@ -335,12 +348,17 @@ for name, path in QC_PATHS.items():
                 labels_np = labels.cpu().numpy()
                 areas_np = area.cpu().numpy()
                 scores_np = gt_score.cpu().numpy()
-                maxpeak_np = max_peak_r4.cpu().numpy()
+
+                maxpeak_np = (
+                    max_peak_r4.cpu().numpy()
+                )
+
                 correct_np = (
                     class_correct.cpu().numpy()
                 )
 
                 for j in range(len(labels_np)):
+
                     gt_w, gt_h = map(
                         float,
                         gtwh_np[j]
@@ -353,14 +371,19 @@ for name, path in QC_PATHS.items():
 
                     if areas_np[j] < 32 ** 2:
                         size_group = "small"
+
                     elif areas_np[j] < 96 ** 2:
                         size_group = "medium"
+
                     else:
                         size_group = "large"
 
-                    # IMPORTANT:
-                    # Historical radius groups use V1.2,
-                    # independent of B1's active config.
+                    # ========================================
+                    # CRITICAL FIX
+                    # The historical radius groups use V1.2,
+                    # regardless of current B1 CONFIG.
+                    # ========================================
+
                     radius = int(
                         gaussian_radius(
                             gt_h,
@@ -373,12 +396,17 @@ for name, path in QC_PATHS.items():
                     records.append({
                         "class_id": int(labels_np[j]),
                         "size": size_group,
+
                         "radius_zero": radius == 0,
+
                         "class_correct": bool(
                             correct_np[j]
                         ),
 
-                        "gt_score": float(scores_np[j]),
+                        "gt_score": float(
+                            scores_np[j]
+                        ),
+
                         "max_peak_r4": float(
                             maxpeak_np[j]
                         ),
@@ -394,6 +422,7 @@ for name, path in QC_PATHS.items():
                         "rel_w": (
                             (pred_w - gt_w) / gt_w
                         ),
+
                         "rel_h": (
                             (pred_h - gt_h) / gt_h
                         ),
@@ -411,9 +440,10 @@ for name, path in QC_PATHS.items():
             images_seen += len(targets)
 
     assert images_seen == 1000
+    assert len(records) == 7117
 
     # ========================================================
-    # GROUPS
+    # 3. GROUPS
     # ========================================================
 
     groups = {
@@ -450,6 +480,14 @@ for name, path in QC_PATHS.items():
         ]
     }
 
+    # Expected counts from original A2 QC6.
+    assert len(groups["radius_0"]) == 2815, (
+        f"Unexpected radius_0 count for {name}: "
+        f"{len(groups['radius_0'])}"
+    )
+
+    assert len(groups["radius_positive"]) == 4302
+
     qc6[name] = {
         group: summarize39(rows)
         for group, rows in groups.items()
@@ -461,7 +499,10 @@ for name, path in QC_PATHS.items():
     )
 
     for group, summary in qc6[name].items():
-        peak = summary["peak_coverage"]["0.05"]
+
+        peak = summary[
+            "peak_coverage"
+        ]["0.05"]
 
         bias_w = (
             100
@@ -488,7 +529,7 @@ for name, path in QC_PATHS.items():
 
 
 # ============================================================
-# 3. VERIFY SAME GT POPULATION
+# 4. VERIFY SAME GT POPULATION
 # ============================================================
 
 assert len({
@@ -503,7 +544,7 @@ assert len({
 
 
 # ============================================================
-# 4. COMPARE BASELINE, A1, A2
+# 5. COMPARISON BETWEEN HISTORICAL MODELS
 # ============================================================
 
 pairs = (
@@ -511,10 +552,12 @@ pairs = (
         "Baseline_V12_160K",
         "Experiment_A1_160K"
     ),
+
     (
         "Baseline_V12_160K",
         "Experiment_A2_160K"
     ),
+
     (
         "Experiment_A1_160K",
         "Experiment_A2_160K"
@@ -522,13 +565,19 @@ pairs = (
 )
 
 for left_name, right_name in pairs:
+
     print(
         f"\nDELTA {right_name} MINUS {left_name}"
     )
 
     for group in (
-        "all", "small", "medium", "large", "person"
+        "all",
+        "small",
+        "medium",
+        "large",
+        "person"
     ):
+
         left = qc6[left_name][group]
         right = qc6[right_name][group]
 
@@ -538,6 +587,7 @@ for left_name, right_name in pairs:
             "abs_rel_w",
             "abs_rel_h"
         ):
+
             delta = (
                 right["wh"][key]["mean"]
                 - left["wh"][key]["mean"]
@@ -551,7 +601,7 @@ for left_name, right_name in pairs:
 
 
 # ============================================================
-# 5. SAVE RESULTS
+# 6. SAVE VERIFIED QC6 RESULTS
 # ============================================================
 
 QC39_FILE = os.path.join(
@@ -564,6 +614,7 @@ with open(
     "w",
     encoding="utf-8"
 ) as file:
+
     json.dump(
         qc6,
         file,
@@ -571,9 +622,10 @@ with open(
         allow_nan=False
     )
 
+print("=" * 70)
 print("STEP 39 COMPLETE — NO TRAINING")
-print(
-    "Radius group definition:",
-    QC39_RADIUS_GROUP_MODE
-)
+print("Radius group definition:", QC39_RADIUS_GROUP_MODE)
+print("Expected radius_0:", 2815)
+print("Expected radius_positive:", 4302)
 print("Saved:", QC39_FILE)
+print("=" * 70)
