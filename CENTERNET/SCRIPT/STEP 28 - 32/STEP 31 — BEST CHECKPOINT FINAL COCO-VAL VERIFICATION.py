@@ -1,55 +1,214 @@
 
-# ============================================================
-# STEP 31 — VERIFY B1 CHECKPOINTS AND LOAD BEST (NO TRAINING)
-# ============================================================
-import os
+# STEP 31 — OFFICIAL COCOeval A2 VS A3
+import os,math,json,io,contextlib,gc
+import numpy as np
 import torch
+from pycocotools.cocoeval import COCOeval
 
-assert os.path.isfile(LAST_CHECKPOINT)
-assert os.path.isfile(BEST_CHECKPOINT)
-assert os.path.isfile(milestone30(20))
-last31 = torch.load(LAST_CHECKPOINT, map_location='cpu', weights_only=False)
-assert last31['experiment_name'] == CONFIG['experiment_name']
-assert last31['source_manifest_sha256'] == source_manifest_sha256
-assert last31['source_images_total'] == 160000
-assert int(last31['epoch']) == 20
-assert len(last31['history']) == 20
-assert all(h['train_stats']['batches'] == 1000 for h in last31['history'])
-for key, value in {
-    'gaussian_radius_mode': 'v1_3_corrected',
-    'wh_loss_type': 'hybrid_abs_relative',
-    'wh_absolute_fraction': 0.75,
-    'wh_relative_fraction': 0.25,
-    'wh_relative_eps': 2.0,
-    'wh_relative_beta': 0.20,
-    'wh_relative_scale': 10.0
-}.items():
-    assert last31['config'][key] == value, f'LAST mismatch: {key}'
+assert len(val_dataset)==5000
 
-checkpoint = torch.load(BEST_CHECKPOINT, map_location='cpu', weights_only=False)
-assert checkpoint['experiment_name'] == CONFIG['experiment_name']
-assert checkpoint['source_manifest_sha256'] == source_manifest_sha256
-assert checkpoint['source_images_total'] == 160000
-assert int(checkpoint['epoch']) in (5, 10, 15, 20)
-assert checkpoint['config']['wh_loss_type'] == 'hybrid_abs_relative'
-assert checkpoint['config']['gaussian_radius_mode'] == 'v1_3_corrected'
-assert abs(float(checkpoint['val_stats']['official_map']) - float(last31['best_map'])) < 1e-9
+source_val_loader,_=build_val_loader(
+    SEED+3301,encoded=True
+)
+assert len(source_val_loader)==625
 
-if 'best_model' in globals():
-    del best_model
+def eval31(path,label):
+    ck=torch.load(
+        path,map_location="cpu",weights_only=False
+    )
+
+    assert ck["arm"]==label
+    assert ck["additional_exposures"]==16000
+    assert ck["gaussian_radius_mode"]=="v1_2_original"
+
+    model_eval=CenterNetResNet101(
+        num_classes=80,
+        pretrained_backbone=False
+    ).to(device)
+
+    model_eval.load_state_dict(
+        ck["model_state_dict"],strict=True
+    )
+    model_eval.eval()
+
+    detections=[]
+    seen=set()
+
+    with torch.inference_mode():
+        for batch in source_val_loader:
+            images,targets=batch[0],batch[1]
+
+            with torch.amp.autocast(
+                "cuda",dtype=torch.bfloat16
+            ):
+                raw=model_eval(
+                    images.to(device,non_blocking=True)
+                )
+
+            predictions=decode_centernet(
+                {k:v.float() for k,v in raw.items()},
+                K=100,score_threshold=0.
+            )
+
+            for pred,t in zip(predictions,targets):
+                image_id=int(t["image_id"])
+                assert image_id not in seen
+                seen.add(image_id)
+
+                scale=float(t["scale"])
+                px,py=map(float,t["pad"].tolist())
+                H,W=map(int,t["original_size"].tolist())
+
+                boxes=pred["boxes"].detach().cpu().float().clone()
+
+                boxes[:,[0,2]]=(
+                    (boxes[:,[0,2]]-px)/scale
+                ).clamp(0,W)
+
+                boxes[:,[1,3]]=(
+                    (boxes[:,[1,3]]-py)/scale
+                ).clamp(0,H)
+
+                scores=pred["scores"].detach().cpu().tolist()
+                labels=pred["labels"].detach().cpu().tolist()
+
+                for bb,sc,cls in zip(
+                    boxes.tolist(),scores,labels
+                ):
+                    x1,y1,x2,y2=map(float,bb)
+
+                    if (
+                        x2<=x1 or y2<=y1
+                        or not math.isfinite(sc)
+                    ):
+                        continue
+
+                    detections.append({
+                        "image_id":image_id,
+                        "category_id":int(
+                            val_dataset.cat_ids[int(cls)]
+                        ),
+                        "bbox":[
+                            x1,y1,x2-x1,y2-y1
+                        ],
+                        "score":float(sc)
+                    })
+
+    assert seen==set(map(int,val_dataset.image_ids))
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        dt=val_dataset.coco.loadRes(detections)
+
+        ce=COCOeval(
+            val_dataset.coco,dt,iouType="bbox"
+        )
+
+        ce.params.imgIds=sorted(
+            map(int,val_dataset.image_ids)
+        )
+        ce.params.catIds=sorted(
+            map(int,val_dataset.cat_ids)
+        )
+        ce.params.maxDets=[1,10,100]
+        ce.params.iouThrs=np.linspace(.5,.95,10)
+
+        ce.evaluate()
+        ce.accumulate()
+        ce.summarize()
+
+    names=(
+        "mAP_50_95","AP50","AP75",
+        "AP_small","AP_medium","AP_large",
+        "AR1","AR10","AR100",
+        "AR_small","AR_medium","AR_large"
+    )
+
+    metrics=dict(zip(names,map(float,ce.stats)))
+
+    prec=ce.eval["precision"]
+    person_idx=ce.params.catIds.index(1)
+
+    pi=prec[
+        :,:,person_idx,
+        ce.params.areaRngLbl.index("all"),2
+    ]
+
+    def positive_mean(v):
+        good=v[v>=0]
+        return float(good.mean()) if len(good) else None
+
+    person={
+        "person_AP_50_95":positive_mean(pi),
+        "person_AP50":positive_mean(pi[0]),
+        "person_AP75":positive_mean(pi[5])
+    }
+
+    result={
+        "label":label,
+        "checkpoint":path,
+        "images":len(seen),
+        "detections":len(detections),
+        "metrics":metrics,
+        "person_metrics":person
+    }
+
+    del model_eval,ce,ck
+    gc.collect()
     torch.cuda.empty_cache()
-best_model = CenterNetResNet101(
-    num_classes=80, pretrained_backbone=False).to(device)
-best_model.load_state_dict(checkpoint['model_state_dict'], strict=True)
-best_model.eval()
+    return result
 
-if 'source_val_loader' not in globals():
-    source_val_loader, source_val_generator = build_val_loader(SEED + 3301, encoded=True)
-final_source_metrics = evaluate_centernet(
-    best_model, source_val_loader, max_batches=None,
-    score_threshold=CONFIG['score_threshold'],
-    iou_threshold=CONFIG['iou_threshold'], compute_official_ap=False)
-print('STEP 31 PASS — best epoch:', checkpoint['epoch'])
-print('Best official mAP:', checkpoint['val_stats']['official_map'])
-print('Geometry50:', final_source_metrics['geometry50'])
-print('Fixed 160K:', milestone30(20))
+paths={
+    "A2_control":os.path.join(
+        PILOT_ROOT,"A2_control","epoch2_add16k.pth"
+    ),
+    "A3_neighbor_R1":os.path.join(
+        PILOT_ROOT,"A3_neighbor_R1","epoch2_add16k.pth"
+    )
+}
+
+results31={}
+
+for name,path in paths.items():
+    assert os.path.isfile(path),path
+    print("Evaluating:",name)
+
+    results31[name]=eval31(path,name)
+
+    print(results31[name]["metrics"])
+    print(results31[name]["person_metrics"])
+
+print("\nA3 MINUS A2 CONTINUATION (percentage points)")
+
+a=results31["A2_control"]
+b=results31["A3_neighbor_R1"]
+
+for k in (
+    "mAP_50_95","AP50","AP75",
+    "AP_small","AP_medium","AP_large","AR100"
+):
+    print(
+        k,
+        round(100*(b["metrics"][k]-a["metrics"][k]),4)
+    )
+
+for k in (
+    "person_AP_50_95",
+    "person_AP50",
+    "person_AP75"
+):
+    print(
+        k,
+        round(
+            100*(b["person_metrics"][k]
+                 -a["person_metrics"][k]),4
+        )
+    )
+
+output31=os.path.join(
+    PILOT_ROOT,"pilot_A2_vs_A3_COCOeval.json"
+)
+
+with open(output31,"w",encoding="utf-8") as f:
+    json.dump(results31,f,indent=2,allow_nan=False)
+
+print("STEP 31 PASS — SAVED:",output31)
