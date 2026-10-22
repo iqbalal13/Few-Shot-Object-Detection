@@ -1,110 +1,82 @@
 
-# ============================================================
-# STEP 17B — B1 TARGET ISOLATION & WORKER PREFLIGHT
-# NO TRAINING
-# ============================================================
-
+# STEP 17B — A3 PREFLIGHT
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader,Subset
 
-print("=" * 70)
-print("STEP 17B — B1 TARGET ISOLATION TEST")
-print("=" * 70)
-
-assert CONFIG["gaussian_radius_mode"] == "v1_3_corrected"
-
-# Synthetic 48x48-pixel bbox => 12x12 output cells.
-# V1.2 radius=1, V1.3 radius=0.
+assert CONFIG["gaussian_radius_mode"]=="v1_2_original"
 
 synthetic = {
-    "boxes": torch.tensor(
-        [[200., 200., 248., 248.]],
+    "boxes":torch.tensor(
+        [[160.,160.,208.,208.]],
         dtype=torch.float32
     ),
-    "labels": torch.tensor(
-        [0], dtype=torch.long
-    )
+    "labels":torch.tensor([0])
 }
 
-v12 = build_centernet_target(
-    synthetic,
-    gaussian_radius_mode="v1_2_original"
-)
+t = build_centernet_target(synthetic)
 
-v13 = build_centernet_target(
-    synthetic,
-    gaussian_radius_mode="v1_3_corrected"
-)
+assert int(t["mask"].sum())==1
+assert int(t["neighbor_mask"].sum())==8
+assert torch.all(t["wh"][0]==12)
 
-# Regression targets must remain identical.
-for key in (
-    "wh", "offset", "indices", "mask", "labels"
-):
-    assert torch.equal(v12[key], v13[key]), key
+center = int(t["indices"][0])
+cy,cx = divmod(center,160)
 
-for key in (
-    "num_objects", "num_candidates", "num_dropped"
-):
-    assert v12[key] == v13[key], key
+assert t["heatmap"][0,cy,cx]==1.
+assert t["heatmap"][0,cy,cx+1]>0
 
-assert not torch.equal(
-    v12["heatmap"],
-    v13["heatmap"]
-), "B1 failed: Gaussian targets are identical."
+# Duplicate overlapping boxes: no unambiguous neighbor.
+overlap = {
+    "boxes":synthetic["boxes"].repeat(2,1),
+    "labels":torch.tensor([0,0])
+}
+t2 = build_centernet_target(overlap)
+assert int(t2["neighbor_mask"].sum())==0
 
-center_index = int(v12["indices"][0])
-cy, cx = divmod(center_index, OUTPUT_WIDTH)
+# Edge case.
+edge = {
+    "boxes":torch.tensor([[0.,0.,12.,12.]]),
+    "labels":torch.tensor([0])
+}
+te = build_centernet_target(edge)
+sel = te["neighbor_indices"][te["neighbor_mask"]]
+assert ((sel>=0)&(sel<160*160)).all()
 
-assert v12["heatmap"][0, cy, cx] == 1.0
-assert v13["heatmap"][0, cy, cx] == 1.0
+# Compare target heatmap with direct original V1.2 drawing.
+for i in range(min(32,len(train_dataset))):
+    _,raw = train_dataset[i]
+    enc = build_centernet_target(raw)
+    old_hm = torch.zeros_like(enc["heatmap"])
+    good_count = 0
 
-assert (
-    v12["heatmap"][0, cy, cx+1]
-    > v13["heatmap"][0, cy, cx+1]
-)
+    for box,cls in zip(raw["boxes"],raw["labels"]):
+        x1,y1,x2,y2 = map(float,box.tolist())
+        bw,bh = x2-x1,y2-y1
+        cx,cy = (x1+x2)/8.,(y1+y2)/8.
 
-print("Synthetic V1.2 vs V1.3: PASSED")
+        if bw<=1 or bh<=1:
+            continue
+        if not (0<=cx<160 and 0<=cy<160):
+            continue
+        if good_count>=CONFIG["max_objects"]:
+            continue
 
+        good_count+=1
 
-# Test real COCO targets
-changed_samples = 0
+        r = max(0,int(gaussian_radius(
+            bh/4.,bw/4.,
+            mode="v1_2_original"
+        )))
 
-for i in range(min(64, len(train_dataset))):
-    _, raw_target = train_dataset[i]
+        draw_gaussian(
+            old_hm[int(cls)],
+            (int(cx),int(cy)),r
+        )
 
-    t12 = build_centernet_target(
-        raw_target,
-        gaussian_radius_mode="v1_2_original"
-    )
+    assert torch.equal(enc["heatmap"],old_hm)
 
-    t13 = build_centernet_target(
-        raw_target,
-        gaussian_radius_mode="v1_3_corrected"
-    )
-
-    for key in (
-        "wh", "offset", "indices", "mask", "labels"
-    ):
-        assert torch.equal(
-            t12[key], t13[key]
-        ), f"Regression target changed: {key}"
-
-    if not torch.equal(
-        t12["heatmap"], t13["heatmap"]
-    ):
-        changed_samples += 1
-
-print(
-    "Real COCO samples with changed heatmap:",
-    changed_samples,
-    "/ 64"
-)
-
-
-# Worker-encoded preflight
-# Uses newly created workers, not old persistent workers.
-test_loader = DataLoader(
-    Subset(train_dataset, range(8)),
+worker_loader = DataLoader(
+    Subset(train_dataset,range(8)),
     batch_size=8,
     shuffle=False,
     num_workers=2,
@@ -112,29 +84,20 @@ test_loader = DataLoader(
     collate_fn=centernet_encoded_collate_fn
 )
 
-images17b, raw17b, encoded17b = next(
-    iter(test_loader)
-)
+images,raw_batch,encoded = next(iter(worker_loader))
 
-for i, target in enumerate(raw17b):
-    direct = build_centernet_target(
-        target,
-        gaussian_radius_mode="v1_3_corrected"
-    )
+for i,raw in enumerate(raw_batch):
+    direct = build_centernet_target(raw)
 
     for key in (
-        "heatmap", "wh", "offset", "indices", "mask"
+        "heatmap","wh","offset",
+        "indices","mask",
+        "neighbor_indices","neighbor_mask"
     ):
         assert torch.equal(
-            encoded17b[key][i],
-            direct[key]
-        ), f"Worker target mismatch: {key}"
+            encoded[key][i],direct[key]
+        ),key
 
-assert encoded17b["heatmap"].shape == (
-    8, 80, 160, 160
-)
+assert encoded["neighbor_mask"].shape==(8,128,8)
 
-del test_loader, images17b, raw17b, encoded17b
-
-print("DataLoader worker target: PASSED")
-print("STEP 17B PASSED — READY FOR B1 TRAINING")
+print("STEP 17B PASS — A3 TARGET AND WORKERS")
