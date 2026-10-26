@@ -1,98 +1,57 @@
-# ============================================================
-# STEP 23 — FULL MODEL FORWARD SANITY TEST
-# ============================================================
 
-print("=" * 70)
-print("STEP 23 — FULL FORWARD SANITY TEST")
-print("=" * 70)
+# STEP 23 — Shape, finite, zero-gate identity
+import torch
 
 model.eval()
 
-batch_images, batch_targets = next(
-    iter(train_loader)
-)
+images, _ = next(iter(train_loader))
+x = images[:1].to(device)
 
-sanity_images = batch_images[:1].to(
-    device
-)
+with torch.inference_mode():
+    fused = model(x)
 
-with torch.no_grad():
+    features = model.backbone(x)
 
-    outputs = model(
-        sanity_images
+    old_neck = model.neck.deconv3(
+        model.neck.deconv2(
+            model.neck.deconv1(features["c5"])
+        )
+    )
+    old = model.heads(old_neck)
+
+for key, channels in [
+    ("heatmap", 80),
+    ("wh", 2),
+    ("offset", 2)
+]:
+    assert fused[key].shape == (
+        1, channels, 160, 160
     )
 
+    assert bool(torch.isfinite(fused[key]).all())
 
-print(
-    "Input   :",
-    sanity_images.shape
-)
+    assert torch.allclose(
+        fused[key],
+        old[key],
+        atol=1e-6,
+        rtol=1e-6
+    ), key
 
-print(
-    "Heatmap :",
-    outputs["heatmap"].shape
-)
-
-print(
-    "WH      :",
-    outputs["wh"].shape
-)
-
-print(
-    "Offset  :",
-    outputs["offset"].shape
-)
-
-
-assert outputs["heatmap"].shape == (
-    1,
-    80,
-    160,
-    160
-)
-
-assert outputs["wh"].shape == (
-    1,
-    2,
-    160,
-    160
-)
-
-assert outputs["offset"].shape == (
-    1,
-    2,
-    160,
-    160
-)
-
-
-for name, tensor in outputs.items():
-
-    assert torch.isfinite(
-        tensor
-    ).all(), f"{name} contains NaN/Inf"
-
-
-print(
-    "\nHeatmap logits range:",
-    float(outputs["heatmap"].min()),
-    "→",
-    float(outputs["heatmap"].max())
-)
-
-print(
-    "Heatmap probability max:",
-    float(
-        torch.sigmoid(
-            outputs["heatmap"]
-        ).max()
+    print(
+        key,
+        "max zero-gate difference",
+        (fused[key] - old[key]).abs().max().item()
     )
+
+assert (
+    model.neck.gate_c3.item()
+    == model.neck.gate_c4.item()
+    == 0.0
 )
 
-print("\nSTEP 23 PASSED")
+print("STEP 23 PASS — B2 output identical to old path at gate=0")
 
-del sanity_images
-del outputs
+del images, x, fused, features, old_neck, old
 
 if torch.cuda.is_available():
     torch.cuda.empty_cache()
