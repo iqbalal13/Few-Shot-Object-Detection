@@ -1,14 +1,9 @@
-# ============================================================
-# STEP 20 — CENTERNET NECK / UPSAMPLING
-# ============================================================
 
-print("=" * 70)
-print("STEP 20 — BUILD CENTERNET UPSAMPLING NECK")
-print("=" * 70)
-
+# STEP 20 — Gate-zero residual C4/C3 fusion
+import torch
+import torch.nn as nn
 
 class CenterNetNeck(nn.Module):
-
     def __init__(
         self,
         in_channels=2048,
@@ -16,110 +11,108 @@ class CenterNetNeck(nn.Module):
     ):
         super().__init__()
 
-        self.deconv1 = nn.Sequential(
-            nn.ConvTranspose2d(
-                in_channels,
-                hidden_channels,
-                kernel_size=4,
-                stride=2,
-                padding=1,
-                bias=False
-            ),
-            nn.BatchNorm2d(
-                hidden_channels
-            ),
-            nn.ReLU(
-                inplace=True
+        def deconv(cin):
+            return nn.Sequential(
+                nn.ConvTranspose2d(
+                    cin,
+                    hidden_channels,
+                    kernel_size=4,
+                    stride=2,
+                    padding=1,
+                    bias=False
+                ),
+                nn.BatchNorm2d(hidden_channels),
+                nn.ReLU(inplace=True)
             )
+
+        self.deconv1 = deconv(in_channels)
+        self.deconv2 = deconv(hidden_channels)
+        self.deconv3 = deconv(hidden_channels)
+
+        # New B2 lateral paths
+        self.lateral_c4 = nn.Conv2d(
+            1024, hidden_channels, kernel_size=1
+        )
+        self.lateral_c3 = nn.Conv2d(
+            512, hidden_channels, kernel_size=1
         )
 
-        self.deconv2 = nn.Sequential(
-            nn.ConvTranspose2d(
-                hidden_channels,
-                hidden_channels,
-                kernel_size=4,
-                stride=2,
-                padding=1,
-                bias=False
-            ),
-            nn.BatchNorm2d(
-                hidden_channels
-            ),
-            nn.ReLU(
-                inplace=True
-            )
+        nn.init.kaiming_normal_(
+            self.lateral_c4.weight,
+            mode="fan_out"
         )
+        nn.init.kaiming_normal_(
+            self.lateral_c3.weight,
+            mode="fan_out"
+        )
+        nn.init.zeros_(self.lateral_c4.bias)
+        nn.init.zeros_(self.lateral_c3.bias)
 
-        self.deconv3 = nn.Sequential(
-            nn.ConvTranspose2d(
-                hidden_channels,
-                hidden_channels,
-                kernel_size=4,
-                stride=2,
-                padding=1,
-                bias=False
-            ),
-            nn.BatchNorm2d(
-                hidden_channels
-            ),
-            nn.ReLU(
-                inplace=True
-            )
+        # Zero-initialized trainable scalar gates.
+        self.gate_c4 = nn.Parameter(
+            torch.tensor(float(CONFIG["b2_gate_init"]))
+        )
+        self.gate_c3 = nn.Parameter(
+            torch.tensor(float(CONFIG["b2_gate_init"]))
         )
 
         self.out_channels = hidden_channels
 
-    def forward(self, x):
+    def forward(self, features):
+        assert isinstance(features, dict)
 
-        x = self.deconv1(x)
+        x = self.deconv1(features["c5"])
+
+        x = (
+            x
+            + self.gate_c4
+            * self.lateral_c4(features["c4"])
+        )
+
         x = self.deconv2(x)
-        x = self.deconv3(x)
 
-        return x
+        x = (
+            x
+            + self.gate_c3
+            * self.lateral_c3(features["c3"])
+        )
+
+        return self.deconv3(x)
 
 
-centernet_neck = CenterNetNeck(
-    in_channels=2048,
-    hidden_channels=256
-).to(device)
+centernet_neck = CenterNetNeck().to(device).eval()
 
+with torch.inference_mode():
+    samples = {
+        "c3": torch.randn(
+            1, 512, 80, 80, device=device
+        ),
+        "c4": torch.randn(
+            1, 1024, 40, 40, device=device
+        ),
+        "c5": torch.randn(
+            1, 2048, 20, 20, device=device
+        )
+    }
 
-# ------------------------------------------------------------
-# Shape sanity test
-# ------------------------------------------------------------
+    out = centernet_neck(samples)
+    assert out.shape == (1, 256, 160, 160)
 
-dummy_feature = torch.randn(
-    1,
-    2048,
-    20,
-    20,
-    device=device
-)
-
-centernet_neck.eval()
-
-with torch.no_grad():
-
-    neck_output = centernet_neck(
-        dummy_feature
+    old_path = centernet_neck.deconv3(
+        centernet_neck.deconv2(
+            centernet_neck.deconv1(samples["c5"])
+        )
     )
 
-print("Input feature :", dummy_feature.shape)
-print("Neck output   :", neck_output.shape)
+    assert torch.allclose(
+        out, old_path,
+        atol=1e-6,
+        rtol=1e-6
+    )
 
-assert tuple(
-    neck_output.shape
-) == (
-    1,
-    256,
-    OUTPUT_HEIGHT,
-    OUTPUT_WIDTH
-)
+print("STEP 20 PASS: zero-gate path equals original deconv")
 
-del dummy_feature
-del neck_output
+del out, old_path, samples
 
 if torch.cuda.is_available():
     torch.cuda.empty_cache()
-
-print("\nSTEP 20 PASSED")
