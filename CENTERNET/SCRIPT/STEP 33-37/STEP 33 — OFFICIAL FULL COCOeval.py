@@ -1,169 +1,203 @@
-# ============================================================
-# STEP 33-A3 — PILOT SUMMARY
-# NO TRAINING / NO RE-EVALUATION
-# Replaces incompatible B1 historical Step 33–41
-# ============================================================
-
-import os
-import json
 
 # ============================================================
-# 1. VERIFY EXPERIMENT CONFIGURATION
+# STEP 33 — A3 QC SETUP & CHECKPOINT INTEGRITY
+# Compatible with Steps 1–32-A3. No training.
 # ============================================================
+import os, json, gc, math, hashlib
+import numpy as np
+import torch
+from torch.utils.data import DataLoader, Subset
 
-assert set(results31) == {
-    "A2_control",
-    "A3_neighbor_R1"
+assert CONFIG['gaussian_radius_mode'] == 'v1_2_original'
+assert CONFIG['wh_loss_type'] == 'hybrid_abs_relative'
+assert CONFIG['a3_neighbor_radius'] == 1
+assert abs(CONFIG['a3_neighbor_lambda'] - 0.25) < 1e-10
+assert len(val_dataset) == 5000 and not val_dataset.augment
+assert OUTPUT_WIDTH == OUTPUT_HEIGHT == 160
+assert val_dataset.cat_id_to_contiguous[1] == 0
+
+A3_QC_DIR = os.path.join(
+    PILOT_ROOT, 'quality_checks_A3_pilot'
+)
+os.makedirs(A3_QC_DIR, exist_ok=True)
+
+A3_ARMS = {
+    'A2_control': os.path.join(
+        PILOT_ROOT, 'A2_control', 'epoch2_add16k.pth'
+    ),
+    'A3_neighbor_R1': os.path.join(
+        PILOT_ROOT, 'A3_neighbor_R1', 'epoch2_add16k.pth'
+    ),
 }
 
-assert set(qc32) == {
-    "A2_control",
-    "A3_neighbor_R1"
+assert set(A3_ARMS) == {
+    'A2_control', 'A3_neighbor_R1'
 }
+
+assert len(set(
+    map(os.path.abspath, A3_ARMS.values())
+)) == 2
+
+A3_CK_META = {}
+
+for arm, path in A3_ARMS.items():
+    assert os.path.isfile(path), f'Missing: {path}'
+
+    ck = torch.load(
+        path, map_location='cpu', weights_only=False
+    )
+
+    assert ck['arm'] == arm
+    assert ck['additional_exposures'] == 16000
+    assert ck['gaussian_radius_mode'] == 'v1_2_original'
+    assert ck['neighbor_lambda'] == (
+        0.0 if arm == 'A2_control' else 0.25
+    )
+    assert ck['base_checkpoint'] == A2_CKPT
+
+    A3_CK_META[arm] = {
+        'checkpoint': path,
+        'base_checkpoint': ck['base_checkpoint'],
+        'source_manifest_sha256': ck['base_source_sha256'],
+        'additional_exposures': ck['additional_exposures'],
+        'neighbor_lambda': ck['neighbor_lambda'],
+    }
+
+    del ck
 
 assert (
-    CONFIG["gaussian_radius_mode"]
-    == "v1_2_original"
+    A3_CK_META['A2_control']['source_manifest_sha256']
+    == A3_CK_META['A3_neighbor_R1']['source_manifest_sha256']
 )
 
-assert CONFIG["a3_neighbor_radius"] == 1
-assert CONFIG["a3_neighbor_lambda"] == 0.25
+# Reuse official COCOeval output from Step 31.
+if 'results31' not in globals():
+    with open(
+        os.path.join(
+            PILOT_ROOT, 'pilot_A2_vs_A3_COCOeval.json'
+        )
+    ) as f:
+        results31 = json.load(f)
 
-for model_name in (
-    "A2_control",
-    "A3_neighbor_R1"
-):
-    path = paths[model_name]
+if 'qc32' not in globals():
+    with open(
+        os.path.join(
+            PILOT_ROOT, 'pilot_A3_WH_neighborhood_QC.json'
+        )
+    ) as f:
+        qc32 = json.load(f)
 
-    assert os.path.isfile(path), (
-        f"Checkpoint missing: {path}"
+assert set(results31) == set(A3_ARMS)
+assert set(qc32) == set(A3_ARMS)
+
+A3_QC_IMAGE_COUNT = 1000
+
+def a3_qc_loader():
+    return DataLoader(
+        Subset(
+            val_dataset, range(A3_QC_IMAGE_COUNT)
+        ),
+        batch_size=8,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=torch.cuda.is_available(),
+        collate_fn=centernet_collate_fn
     )
 
-    assert results31[model_name]["images"] == 5000
-
-
-# ============================================================
-# 2. OFFICIAL COCOeval COMPARISON
-# ============================================================
-
-metric_keys = (
-    "mAP_50_95",
-    "AP50",
-    "AP75",
-    "AP_small",
-    "AP_medium",
-    "AP_large",
-    "AR100"
-)
-
-a = results31["A2_control"]["metrics"]
-b = results31["A3_neighbor_R1"]["metrics"]
-
-print("=" * 70)
-print("A3 PILOT — OFFICIAL COCOeval")
-print("A3 minus A2 continuation")
-print("=" * 70)
-
-deltas = {}
-
-for key in metric_keys:
-    deltas[key] = 100 * (b[key] - a[key])
-
-    print(
-        f"{key:<18}: "
-        f"A2={100*a[key]:8.4f}% | "
-        f"A3={100*b[key]:8.4f}% | "
-        f"Delta={deltas[key]:+8.4f} pp"
+def a3_load_net(arm):
+    ck = torch.load(
+        A3_ARMS[arm],
+        map_location='cpu',
+        weights_only=False
     )
 
+    net = CenterNetResNet101(
+        num_classes=80,
+        pretrained_backbone=False
+    ).to(device)
 
-# ============================================================
-# 3. WH NEIGHBORHOOD ROBUSTNESS
-# ============================================================
+    net.load_state_dict(
+        ck['model_state_dict'], strict=True
+    )
+    net.eval()
 
-qa = qc32["A2_control"]["all"]
-qb = qc32["A3_neighbor_R1"]["all"]
+    del ck
+    return net
 
-assert (
-    qa["eligible_GT"]
-    == qb["eligible_GT"]
-)
+def a3_wh_iou(p, t):
+    p = np.maximum(
+        np.asarray(p, dtype=np.float64), 0.
+    )
+    t = np.asarray(t, dtype=np.float64)
 
-center_delta = (
-    qb["center_iou"]
-    - qa["center_iou"]
-)
+    intersection = np.minimum(p, t).prod()
+    union = p.prod() + t.prod() - intersection
 
-neighbor_delta = (
-    qb["neighbor_iou"]
-    - qa["neighbor_iou"]
-)
+    return float(
+        intersection / max(union, 1e-9)
+    )
 
-print("\n" + "=" * 70)
-print("A3 PILOT — WH ROBUSTNESS")
-print("=" * 70)
+def a3_xyxy_iou(p, t):
+    p = np.asarray(p, dtype=np.float64)
+    t = np.asarray(t, dtype=np.float64)
 
-print("Eligible GT:", qb["eligible_GT"])
+    inter = np.maximum(
+        0.,
+        np.minimum(p[2:], t[2:])
+        - np.maximum(p[:2], t[:2])
+    ).prod()
+
+    a = np.maximum(
+        0., p[2:] - p[:2]
+    ).prod()
+
+    b = np.maximum(
+        0., t[2:] - t[:2]
+    ).prod()
+
+    return float(inter / max(a + b - inter, 1e-9))
+
+def a3_pred_box(grid_xy, offset_xy, wh):
+    c = (
+        np.asarray(grid_xy, dtype=float)
+        + np.asarray(offset_xy, dtype=float)
+    ) * OUTPUT_STRIDE
+
+    h = (
+        np.maximum(
+            np.asarray(wh, dtype=float), 0
+        ) * OUTPUT_STRIDE / 2
+    )
+
+    return np.r_[c - h, c + h]
+
+def a3_mean(rows, field):
+    v = [
+        r[field]
+        for r in rows
+        if r.get(field) is not None
+        and np.isfinite(r[field])
+    ]
+
+    return float(np.mean(v)) if v else None
+
+def a3_save_json(name, data):
+    path = os.path.join(A3_QC_DIR, name)
+
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(
+            data, f,
+            indent=2,
+            allow_nan=False
+        )
+
+    print('Saved:', path)
+    return path
 
 print(
-    "Center WH IoU:"
-    f"\n  A2 = {qa['center_iou']:.6f}"
-    f"\n  A3 = {qb['center_iou']:.6f}"
-    f"\n  Delta = {center_delta:+.6f}"
+    'STEP 33 PASS — checkpoints independent, '
+    'pilot A2/A3 ready'
 )
 
-print(
-    "Neighbor WH IoU:"
-    f"\n  A2 = {qa['neighbor_iou']:.6f}"
-    f"\n  A3 = {qb['neighbor_iou']:.6f}"
-    f"\n  Delta = {neighbor_delta:+.6f}"
-)
-
-
-# ============================================================
-# 4. SAVE FINAL PILOT REPORT
-# ============================================================
-
-summary = {
-    "experiment": "A3-R1 pilot warm-start from A2 160K",
-    "additional_exposures_per_arm": 16000,
-    "comparison": "A3_neighbor_R1 vs A2_control",
-
-    "COCO_mAP_delta_pp": deltas["mAP_50_95"],
-
-    "official_metric_deltas_pp": deltas,
-
-    "eligible_gt_wh_qc": qb["eligible_GT"],
-
-    "center_iou_delta": center_delta,
-
-    "neighbor_iou_delta": neighbor_delta,
-
-    "note": (
-        "Pilot from A2 checkpoint; "
-        "not a fresh 160K A3 experiment "
-        "or multi-seed result."
-    )
-}
-
-output_path = os.path.join(
-    PILOT_ROOT,
-    "A3_pilot_summary_verified.json"
-)
-
-with open(
-    output_path,
-    "w",
-    encoding="utf-8"
-) as file:
-    json.dump(
-        summary,
-        file,
-        indent=2,
-        allow_nan=False
-    )
-
-print("\n" + "=" * 70)
-print("STEP 33-A3 COMPLETE")
-print("Saved:", output_path)
-print("=" * 70)
+for arm, meta in A3_CK_META.items():
+    print(arm, meta)
