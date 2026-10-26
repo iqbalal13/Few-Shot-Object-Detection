@@ -1,191 +1,178 @@
 
 # ============================================================
-# STEP 41 — B1 vs A2 / COCO-VAL PAIRED QC (NO TRAINING)
-# 1000 images, threshold .05, all/small/medium/large/person.
+# STEP 41 — A3 PILOT EVIDENCE SUMMARY / GO-NO-GO
+# No inference, no training. All metrics from Steps 31–40.
 # ============================================================
-import os, json, gc
-from collections import defaultdict
-import numpy as np
-import torch
-from torch.utils.data import DataLoader, Subset
 
-QC41_PATHS = {
-    'A2_V12_160K': os.path.join(
-        '/content/drive/MyDrive',
-        'CenterNet_COCO80_V12_A2_HYBRIDWH_FRESH_160K_BS8',
-        'epoch20_160k.pth'),
-    'B1_V13_160K': milestone30(20)
+for key in (
+    'summary35',
+    'summary36',
+    'summary37',
+    'summary38',
+    'summary39',
+    'summary40'
+):
+    assert key in globals(), (
+        f'Run prior QC step first: {key}'
+    )
+
+AP = summary37[
+    'delta_A3_minus_A2_percentage_points'
+]
+
+robustness = (
+    summary40['A3_neighbor_R1']['all'][
+        'eligible_neighbor_iou'
+    ]
+    -
+    summary40['A2_control']['all'][
+        'eligible_neighbor_iou'
+    ]
+)
+
+center_delta = (
+    summary40['A3_neighbor_R1']['all'][
+        'eligible_center_iou'
+    ]
+    -
+    summary40['A2_control']['all'][
+        'eligible_center_iou'
+    ]
+)
+
+peak_shared = summary38[
+    'common_gt_paired_at_peak'
+]['all']
+
+final41 = {
+    'experiment': (
+        'A3-R1 pilot warm-start, '
+        'matched A2-continuation control'
+    ),
+
+    'training': {
+        'base_checkpoint': A2_CKPT,
+        'base_exposures': 160000,
+        'additional_exposures_per_arm': 16000,
+        'total_exposures_per_arm': 176000,
+        'lambda_control': 0.0,
+        'lambda_A3': 0.25,
+        'gaussian_mode': 'v1_2_original',
+        'WH_loss': (
+            'hybrid_absolute_0.75_relative_0.25'
+        )
+    },
+
+    'official_AP_delta_percentage_points': AP,
+
+    'neighbor_WH_size_iou_delta': robustness,
+    'eligible_center_WH_size_iou_delta': center_delta,
+
+    'shared_matched_top100_GT_count': peak_shared['n'],
+
+    'shared_matched_peak_WH_size_iou_delta': (
+        peak_shared['delta_matched_WH_size_iou']
+    ),
+
+    'shared_matched_peak_box_iou_delta': (
+        peak_shared['delta_matched_box_iou']
+    ),
+
+    'quality_checks': {
+        'GT_total': (
+            QC34_COUNTS['A2_control']['gt']
+        ),
+
+        'GT_with_valid_neighbors': (
+            QC34_COUNTS['A2_control'][
+                'eligible_neighbors_gt'
+            ]
+        ),
+
+        'lambda_gradient_sanity_passed': (
+            summary35['gradient_sanity']
+        ),
+    },
+
+    'limitations': [
+        'One seed and one paired pilot; no uncertainty interval',
+        'Matched-peak diagnostic is non-exclusive; not COCOeval matching',
+        'QC uses 1000 val images, official AP uses 5000',
+        'Warm-start from A2; not a fresh 160K A3 training',
+        'Results are source-stage COCO, not CCTV few-shot adaptation',
+    ]
 }
-QC41_SCORE = 0.05
-QC41_IMAGE_COUNT = 1000
-QC41_GROUPS = ('all', 'small', 'medium', 'large', 'person')
-PERSON41 = int(NAME_TO_CONTIGUOUS['person'])
-for label, path in QC41_PATHS.items():
-    assert os.path.isfile(path), f'Missing {label}: {path}'
 
+a3_save_json(
+    'qc41_A3_pilot_final_summary.json',
+    final41
+)
 
-def qc41_size_iou(wh, true_wh):
-    pw, ph = [max(0., float(a)) for a in wh]
-    tw, th = [float(a) for a in true_wh]
-    inter = min(pw, tw) * min(ph, th)
-    return inter / max(pw * ph + tw * th - inter, 1e-9)
+print('=' * 74)
+print('A3 PILOT FINAL SUMMARY')
 
+print(
+    'mAP Δ (percentage points):',
+    round(AP['mAP_50_95'], 5)
+)
 
-def qc41_loader():
-    return DataLoader(Subset(val_dataset, range(QC41_IMAGE_COUNT)),
-                      batch_size=8, shuffle=False, num_workers=2,
-                      pin_memory=True, collate_fn=centernet_collate_fn)
+print(
+    'AP75 Δ (percentage points):',
+    round(AP['AP75'], 5)
+)
 
+print(
+    'AP small/medium/large Δ:',
+    *[
+        round(AP[k], 5)
+        for k in (
+            'AP_small',
+            'AP_medium',
+            'AP_large'
+        )
+    ]
+)
 
-def qc41_run_model(path, name):
-    ckpt = torch.load(path, map_location='cpu', weights_only=False)
-    assert int(ckpt['epoch']) == 20
-    if name.startswith('B1'):
-        assert ckpt['config']['gaussian_radius_mode'] == 'v1_3_corrected'
-        assert ckpt['config']['wh_loss_type'] == 'hybrid_abs_relative'
-    else:
-        assert ckpt['config']['gaussian_radius_mode'] == 'v1_2_original'
-        assert ckpt['config']['wh_loss_type'] == 'hybrid_abs_relative'
-    net = CenterNetResNet101(num_classes=80, pretrained_backbone=False).to(device)
-    net.load_state_dict(ckpt['model_state_dict'], strict=True)
-    net.eval()
-    del ckpt
-    sums = {g: defaultdict(float) for g in QC41_GROUPS}
-    seen = 0
+print(
+    'Person AP Δ:',
+    round(
+        AP['person_AP_50_95'],
+        5
+    )
+)
 
-    with torch.inference_mode():
-        for images, raw_targets in qc41_loader():
-            images = images.to(device, non_blocking=True)
-            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                out = net(images)
-            logits = out['heatmap'].float()
-            local = heatmap_local_nms(logits.sigmoid())
-            scores, _, classes, ys, xs = topk_centers(local, K=100)
-            scores = scores.detach().cpu().numpy()
-            classes = classes.detach().cpu().numpy()
-            ys = ys.detach().cpu().numpy()
-            xs = xs.detach().cpu().numpy()
+print(
+    'WH size IoU Δ, eligible neighbor:',
+    round(robustness, 6)
+)
 
-            for b, raw_target in enumerate(raw_targets):
-                # The WH/offset targets are identical for V1.2 and V1.3.
-                enc = build_centernet_target(raw_target)
-                valid_idx = torch.nonzero(enc['mask']).flatten().tolist()
-                scale = float(raw_target['scale'].item())
-                peak_cache = {}
-                gt_entries = []
+print(
+    'WH size IoU Δ, eligible GT center:',
+    round(center_delta, 6)
+)
 
-                for k in valid_idx:
-                    cls = int(enc['labels'][k])
-                    cy, cx = divmod(int(enc['indices'][k]), OUTPUT_WIDTH)
-                    gt_wh = enc['wh'][k].tolist()
-                    area = gt_wh[0] * gt_wh[1] * (OUTPUT_STRIDE / scale) ** 2
-                    size = 'small' if area < 32**2 else ('medium' if area < 96**2 else 'large')
-                    groups = ['all', size] + (['person'] if cls == PERSON41 else [])
+print(
+    'Matched top100 common-GT WH IoU Δ:',
+    peak_shared[
+        'delta_matched_WH_size_iou'
+    ]
+)
 
-                    # Find nearest class-correct local maximum with score >= 0.05.
-                    if cls not in peak_cache:
-                        peak_cache[cls] = torch.nonzero(
-                            local[b, cls] >= QC41_SCORE, as_tuple=False
-                        ).detach().cpu().numpy()
-                    coords = peak_cache[cls]
-                    if len(coords):
-                        dist = np.maximum(abs(coords[:, 0] - cy),
-                                          abs(coords[:, 1] - cx))
-                        nearest_idx = int(np.argmin(dist))
-                        distance = float(dist[nearest_idx])
-                        py, px = map(int, coords[nearest_idx])
-                    else:
-                        distance, py, px = float('inf'), -1, -1
+print(
+    'Interpretation:',
+    (
+        'positive pilot, needs replication'
+        if AP['mAP_50_95'] > 0
+        and robustness > 0
+        else 'not clearly beneficial on paired pilot'
+    )
+)
 
-                    center_class_ok = int(int(logits[b, :, cy, cx].argmax()) == cls)
-                    exact = int(float(local[b, cls, cy, cx]) >= QC41_SCORE)
-                    wh_gtcenter = out['wh'][b, :, cy, cx].float().tolist()
-                    iou_gtcenter = qc41_size_iou(wh_gtcenter, gt_wh)
-                    topmask = ((classes[b] == cls) & (scores[b] >= QC41_SCORE)
-                               & (np.maximum(abs(ys[b] - cy), abs(xs[b] - cx)) <= 1))
-                    top100 = int(bool(topmask.any()))
+print(
+    'Do not claim large improvement '
+    'or FSOD CCTV success.'
+)
 
-                    for group in groups:
-                        st = sums[group]
-                        st['n'] += 1
-                        st['class_center'] += center_class_ok
-                        st['exact'] += exact
-                        st['peak1'] += int(distance <= 1)
-                        st['peak2'] += int(distance <= 2)
-                        st['peak4'] += int(distance <= 4)
-                        st['top100'] += top100
-                        st['wh_center_sum'] += iou_gtcenter
-                        if distance <= 4:
-                            wh_atpeak = out['wh'][b, :, py, px].float().tolist()
-                            st['pair_n'] += 1
-                            st['pair_center_sum'] += iou_gtcenter
-                            st['pair_peak_sum'] += qc41_size_iou(wh_atpeak, gt_wh)
-                    gt_entries.append((cls, cy, cx, groups))
-
-                # One-to-one top100 matching within +/-1 Chebyshev cell.
-                candidates = []
-                for gi, (cls, cy, cx, groups) in enumerate(gt_entries):
-                    for pi in range(len(scores[b])):
-                        if classes[b, pi] != cls or scores[b, pi] < QC41_SCORE:
-                            continue
-                        dist = max(abs(int(ys[b, pi]) - cy),
-                                   abs(int(xs[b, pi]) - cx))
-                        if dist <= 1:
-                            candidates.append((-float(scores[b, pi]), float(dist), gi, pi))
-                candidates.sort()
-                used_gt, used_peak = set(), set()
-                for _, _, gi, pi in candidates:
-                    if gi in used_gt or pi in used_peak:
-                        continue
-                    used_gt.add(gi)
-                    used_peak.add(pi)
-                    for group in gt_entries[gi][3]:
-                        sums[group]['top100_unique'] += 1
-
-            seen += len(raw_targets)
-
-    assert seen == QC41_IMAGE_COUNT
-    result = {'model': name, 'images': seen, 'groups': {}}
-    for group in QC41_GROUPS:
-        st = sums[group]
-        n, paired = int(st['n']), int(st['pair_n'])
-        result['groups'][group] = {
-            'gt': n, 'class_correct_center_pct': 100*st['class_center']/max(n, 1),
-            'exact_peak_pct': 100*st['exact']/max(n, 1),
-            'peak1_pct': 100*st['peak1']/max(n, 1),
-            'peak2_pct': 100*st['peak2']/max(n, 1),
-            'peak4_pct': 100*st['peak4']/max(n, 1),
-            'top100_near1_pct': 100*st['top100']/max(n, 1),
-            'top100_one_to_one_near1_pct': 100*st['top100_unique']/max(n, 1),
-            'wh_center_iou': st['wh_center_sum']/max(n, 1),
-            'matched_peak4_n': paired,
-            'wh_center_iou_matched_peak4': st['pair_center_sum']/max(paired, 1),
-            'wh_peak_iou_matched_peak4': st['pair_peak_sum']/max(paired, 1),
-        }
-    del net
-    gc.collect()
-    torch.cuda.empty_cache()
-    return result
-
-
-qc41_results = {}
-for label, path in QC41_PATHS.items():
-    print('QC41 evaluating:', label)
-    qc41_results[label] = qc41_run_model(path, label)
-for group in QC41_GROUPS:
-    print('\nGROUP:', group)
-    for label, res in qc41_results.items():
-        x = res['groups'][group]
-        print(f'{label:16} GT={x["gt"]:5d} '
-              f'peak±1={x["peak1_pct"]:6.2f}% '
-              f'peak±2={x["peak2_pct"]:6.2f}% '
-              f'peak±4={x["peak4_pct"]:6.2f}% '
-              f'Top100±1={x["top100_near1_pct"]:6.2f}% '
-              f'1-to-1={x["top100_one_to_one_near1_pct"]:6.2f}% '
-              f'WH@GT={x["wh_center_iou"]:.4f}')
-
-save41 = os.path.join(FULL_CHECKPOINT_DIR, 'b1_qc41_comparison.json')
-with open(save41, 'w', encoding='utf-8') as f:
-    json.dump(qc41_results, f, indent=2, allow_nan=False)
-print('STEP 41 PASS | saved:', save41)
-print('Note: QC41 local peaks use score >= 0.05; not identical to old QC36.')
+print(
+    'STEP 41 COMPLETE — NO TRAINING'
+)
