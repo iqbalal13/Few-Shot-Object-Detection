@@ -1,418 +1,440 @@
 
 # ============================================================
-# STEP 34 — QC1 / WH + OFFSET + ORACLE BOX
-# BASELINE VS A1 VS A2 — ALL AT 160K
-# INFERENCE ONLY
+# STEP 34 — PAIRED 1000-IMAGE QC INFERENCE CACHE
+# Runs inference once per arm. No training.
 # ============================================================
+from collections import Counter
+import torch.nn.functional as F
 
-import os
-import json
-import gc
-import numpy as np
-import torch
-from torch.utils.data import DataLoader, Subset
+QC34_RECORDS = {}
+QC34_COUNTS = {}
 
-QC_BASE160 = os.path.join(
-    "/content/drive/MyDrive",
-    "CenterNet_COCO80_V12_CONTINUE_160K",
-    "epoch20_160k.pth"
-)
+QC34_RADIUS_DIRECTIONS = [
+    (dx, dy)
+    for dy in (-1, 0, 1)
+    for dx in (-1, 0, 1)
+    if dx != 0 or dy != 0
+]
 
-QC_A1_160 = os.path.join(
-    "/content/drive/MyDrive",
-    "CenterNet_COCO80_V12_A_RELWH_FRESH_160K_BS8",
-    "epoch20_160k.pth"
-)
-
-# Historical A2 is separate from the current B1 run.
-QC_A2_DIR = os.path.join(
-    "/content/drive/MyDrive",
-    "CenterNet_COCO80_V12_A2_HYBRIDWH_FRESH_160K_BS8"
-)
-QC_A2_160 = os.path.join(
-    QC_A2_DIR, "epoch20_160k.pth"
-)
-
-QC_B1_160 = milestone30(20)
-
-assert (
-    os.path.abspath(QC_A2_160)
-    != os.path.abspath(QC_B1_160)
-)
-
-# Historical comparison always uses 3 original models.
-QC_PATHS = {
-    "Baseline_V12_160K": QC_BASE160,
-    "Experiment_A1_160K": QC_A1_160,
-    "Experiment_A2_160K": QC_A2_160
-}
-
-# Keep corrected reports separate from old mislabeled data.
-QC_OUT = os.path.join(
-    FULL_CHECKPOINT_DIR,
-    "quality_checks_verified_historical"
-)
-os.makedirs(QC_OUT, exist_ok=True)
-
-assert CONFIG["source_images_total"] == 160000
-assert CONFIG["wh_loss_type"] == "hybrid_abs_relative"
-assert len(val_dataset) == 5000
-assert not val_dataset.augment
-
-for name, path in QC_PATHS.items():
-    assert os.path.isfile(path), f"{name} missing: {path}"
-
-# Verify A2 is actually V1.2 and hybrid WH.
-a2_ckpt34 = torch.load(
-    QC_A2_160,
-    map_location="cpu",
-    weights_only=False
-)
-assert int(a2_ckpt34["epoch"]) == 20
-assert (
-    a2_ckpt34["config"]["gaussian_radius_mode"]
-    == "v1_2_original"
-)
-assert (
-    a2_ckpt34["config"]["wh_loss_type"]
-    == "hybrid_abs_relative"
-)
-del a2_ckpt34
-
-assert len(QC_PATHS) == 3
-
-print("QC1 historical checkpoints:")
-for label, path in QC_PATHS.items():
-    print(f"{label}: {path}")
-
-
-# ============================================================
-# SHARED QC HELPERS
-# ============================================================
-
-def qc_load_model(path):
-    ckpt = torch.load(
-        path,
-        map_location="cpu",
-        weights_only=False
-    )
-
-    assert int(ckpt["epoch"]) == 20
-    assert "model_state_dict" in ckpt
-
-    net = CenterNetResNet101(
-        num_classes=80,
-        pretrained_backbone=False
-    ).to(device)
-
-    net.load_state_dict(
-        ckpt["model_state_dict"],
-        strict=True
-    )
-    net.eval()
-
-    del ckpt
-    return net
-
-
-def qc_loader():
-    return DataLoader(
-        Subset(val_dataset, range(1000)),
-        batch_size=8,
-        shuffle=False,
-        num_workers=2,
-        pin_memory=True,
-        collate_fn=centernet_collate_fn
-    )
-
-
-def qc_valid_gt(t, height, width):
-    boxes = t["boxes"].to(device).float()
-    labels = t["labels"].to(device).long()
-
-    stride = CONFIG["output_stride"]
-
-    wh = (
-        boxes[:, 2:] - boxes[:, :2]
-    ) / stride
-
-    ctr = (
-        boxes[:, :2] + boxes[:, 2:]
-    ) / (2 * stride)
-
-    ij = ctr.floor().long()
-
-    ok = (
-        (wh > 1 / stride).all(1)
-        & (ij[:, 0] >= 0)
-        & (ij[:, 0] < width)
-        & (ij[:, 1] >= 0)
-        & (ij[:, 1] < height)
-        & (labels >= 0)
-        & (labels < 80)
-    )
-
-    return (
-        boxes[ok],
-        labels[ok],
-        wh[ok],
-        ctr[ok],
-        ij[ok]
-    )
-
-
-def qc_iou(pred_boxes, gt_boxes):
-    lt = torch.maximum(
-        pred_boxes[:, :2],
-        gt_boxes[:, :2]
-    )
-    rb = torch.minimum(
-        pred_boxes[:, 2:],
-        gt_boxes[:, 2:]
-    )
-
-    intersection = (
-        rb - lt
-    ).clamp_min(0).prod(1)
-
-    pred_area = (
-        pred_boxes[:, 2:] - pred_boxes[:, :2]
-    ).clamp_min(0).prod(1)
-
-    gt_area = (
-        gt_boxes[:, 2:] - gt_boxes[:, :2]
-    ).clamp_min(0).prod(1)
-
-    return intersection / (
-        pred_area + gt_area - intersection
-    ).clamp_min(1e-8)
-
-
-def qc_box(center_cells, wh_cells):
-    stride = CONFIG["output_stride"]
-    center_px = center_cells * stride
-    half = wh_cells.clamp_min(0) * stride / 2
-
-    return torch.cat(
-        (
-            center_px - half,
-            center_px + half
-        ),
-        dim=-1
-    )
-
-
-# ============================================================
-# EVALUATE ALL THREE CHECKPOINTS
-# ============================================================
-
-qc1 = {}
-
-for name, path in QC_PATHS.items():
-    model = qc_load_model(path)
-
-    stat = {
-        key: []
-        for key in (
-            "wh_abs",
-            "off_abs",
-            "off05_abs",
-            "iou",
-            "wh_bad_gt",
-            "gt_confidence",
-            "top_confidence",
-            "wh_bad_top",
-            "off_bad_top"
-        )
-    }
-
-    image_count = 0
+for arm in A3_ARMS:
+    net = a3_load_net(arm)
+    records = []
+    seen_images = set()
 
     with torch.inference_mode():
-        for images, targets in qc_loader():
-
+        for images, raw_targets in a3_qc_loader():
             with torch.amp.autocast(
-                "cuda",
-                dtype=torch.bfloat16
+                'cuda', dtype=torch.bfloat16
             ):
-                raw = model(images.to(device))
+                raw = net(
+                    images.to(
+                        device, non_blocking=True
+                    )
+                )
 
-            raw = {
-                key: value.float()
-                for key, value in raw.items()
-            }
+            hm = raw['heatmap'].float().sigmoid()
+            wh = raw['wh'].float()
+            off = raw['offset'].float()
 
-            probability = raw["heatmap"].sigmoid()
-            peaks = heatmap_local_nms(probability)
+            peaks = heatmap_local_nms(hm)
 
-            scores, indices, _, _, _ = topk_centers(
-                peaks, K=100
+            tk_score, tk_idx, tk_cls, tk_y, tk_x = (
+                topk_centers(peaks, K=100)
             )
 
-            top_wh = transpose_and_gather_feature(
-                raw["wh"], indices
-            )
-            top_off = transpose_and_gather_feature(
-                raw["offset"], indices
-            )
+            for b, target in enumerate(raw_targets):
+                image_id = int(target['image_id'])
 
-            stat["top_confidence"].extend(
-                scores.flatten().cpu().tolist()
-            )
+                assert image_id not in seen_images
+                seen_images.add(image_id)
 
-            stat["wh_bad_top"].extend(
-                (top_wh <= 0).any(-1).flatten().cpu().tolist()
-            )
-
-            stat["off_bad_top"].extend(
-                (
-                    (top_off < 0)
-                    | (top_off >= 1)
-                ).any(-1).flatten().cpu().tolist()
-            )
-
-            H, W = probability.shape[-2:]
-
-            for b, target in enumerate(targets):
-                boxes, labels, gt_wh, center, ij = (
-                    qc_valid_gt(target, H, W)
+                enc = build_centernet_target(
+                    target,
+                    gaussian_radius_mode='v1_2_original'
                 )
 
-                if not len(labels):
-                    continue
-
-                x = ij[:, 0]
-                y = ij[:, 1]
-
-                pred_wh = raw["wh"][b, :, y, x].T
-                pred_off = raw["offset"][b, :, y, x].T
-                gt_off = center - ij.float()
-
-                oracle_iou = qc_iou(
-                    qc_box(
-                        ij.float() + pred_off,
-                        pred_wh
-                    ),
-                    boxes
+                scale = float(target['scale'])
+                gt_boxes = (
+                    target['boxes'].cpu().numpy()
                 )
 
-                stat["wh_abs"].extend(
-                    (pred_wh - gt_wh)
-                    .abs()
-                    .flatten()
-                    .cpu()
-                    .tolist()
+                active = torch.nonzero(
+                    enc['mask']
+                ).flatten().tolist()
+
+                # Reconstruct the same accepted GT order
+                # as target generation in Step 16.
+                boxes_accepted = []
+
+                for bx in gt_boxes:
+                    x1, y1, x2, y2 = map(float, bx)
+                    bw, bh = x2 - x1, y2 - y1
+
+                    cx = (
+                        x1 + x2
+                    ) / (2 * OUTPUT_STRIDE)
+
+                    cy = (
+                        y1 + y2
+                    ) / (2 * OUTPUT_STRIDE)
+
+                    if bw <= 1 or bh <= 1:
+                        continue
+
+                    if not (
+                        0 <= cx < OUTPUT_WIDTH
+                        and 0 <= cy < OUTPUT_HEIGHT
+                    ):
+                        continue
+
+                    if len(boxes_accepted) >= CONFIG['max_objects']:
+                        break
+
+                    boxes_accepted.append(bx.copy())
+
+                assert len(boxes_accepted) == len(active)
+
+                score_b = (
+                    tk_score[b].detach().cpu().numpy()
+                )
+                cls_b = (
+                    tk_cls[b].detach().cpu().numpy()
+                )
+                x_b = (
+                    tk_x[b].detach().cpu().numpy().astype(int)
+                )
+                y_b = (
+                    tk_y[b].detach().cpu().numpy().astype(int)
                 )
 
-                stat["off_abs"].extend(
-                    (pred_off - gt_off)
-                    .abs()
-                    .flatten()
-                    .cpu()
-                    .tolist()
-                )
+                # Copy once per image to avoid many GPU syncs.
+                hm_b = hm[b].detach().cpu().numpy()
+                wh_b = wh[b].detach().cpu().numpy()
+                off_b = off[b].detach().cpu().numpy()
+                peaks_b = peaks[b].detach().cpu().numpy()
 
-                stat["off05_abs"].extend(
-                    (gt_off - 0.5)
-                    .abs()
-                    .flatten()
-                    .cpu()
-                    .tolist()
-                )
+                for k in active:
+                    ind = int(enc['indices'][k])
+                    gy, gx = divmod(ind, OUTPUT_WIDTH)
 
-                stat["iou"].extend(
-                    oracle_iou.cpu().tolist()
-                )
+                    label = int(enc['labels'][k])
+                    true_wh = enc['wh'][k].numpy()
+                    bx = np.asarray(
+                        boxes_accepted[k], dtype=float
+                    )
+                    true_off = enc['offset'][k].numpy()
 
-                stat["wh_bad_gt"].extend(
-                    (pred_wh <= 0)
-                    .any(-1)
-                    .cpu()
-                    .tolist()
-                )
+                    center_wh = wh_b[:, gy, gx]
+                    center_off = off_b[:, gy, gx]
 
-                stat["gt_confidence"].extend(
-                    probability[b, labels, y, x]
-                    .cpu()
-                    .tolist()
-                )
+                    radius = int(
+                        gaussian_radius(
+                            float(true_wh[1]),
+                            float(true_wh[0]),
+                            min_overlap=0.7,
+                            mode='v1_2_original'
+                        )
+                    )
 
-            image_count += len(targets)
+                    area = (
+                        float(true_wh.prod())
+                        * (OUTPUT_STRIDE / scale) ** 2
+                    )
 
-    assert image_count == 1000
+                    group = (
+                        'small' if area < 1024
+                        else 'medium' if area < 9216
+                        else 'large'
+                    )
 
-    oracle = np.asarray(stat["iou"])
-    assert len(oracle) > 0
+                    # Class-correct top100 nearest peak.
+                    # Non-exclusive diagnostic matching.
+                    candidates = [
+                        (
+                            max(
+                                abs(int(xx) - gx),
+                                abs(int(yy) - gy)
+                            ),
+                            -float(ss),
+                            int(xx),
+                            int(yy),
+                            float(ss)
+                        )
+                        for xx, yy, cl, ss
+                        in zip(x_b, y_b, cls_b, score_b)
+                        if int(cl) == label and ss >= 0.05
+                    ]
 
-    qc1[name] = {
-        "images": image_count,
-        "gt_count": int(len(oracle)),
-        "wh_mae_cells": float(
-            np.mean(stat["wh_abs"])
+                    candidates.sort()
+                    near = candidates[0] if candidates else None
+
+                    if near is not None and near[0] > 4:
+                        near = None
+
+                    top_dist = (
+                        int(near[0]) if near else None
+                    )
+
+                    matched_box_iou = None
+                    matched_gtwh_iou = None
+                    matched_whoiou = None
+                    matched_offset_mae = None
+
+                    if near is not None:
+                        _, _, px, py, _ = near
+
+                        whpk = wh_b[:, py, px]
+                        ofpk = off_b[:, py, px]
+
+                        matched_whoiou = a3_wh_iou(
+                            whpk, true_wh
+                        )
+
+                        matched_offset_mae = float(
+                            np.abs(
+                                ofpk - true_off
+                            ).mean()
+                        )
+
+                        matched_box = a3_pred_box(
+                            (px, py), ofpk, whpk
+                        )
+
+                        matched_box_iou = a3_xyxy_iou(
+                            matched_box, bx
+                        )
+
+                        matched_gtwh_iou = a3_xyxy_iou(
+                            a3_pred_box(
+                                (px, py), ofpk, true_wh
+                            ),
+                            bx
+                        )
+
+                    neighbor_indices = (
+                        enc['neighbor_indices'][k][
+                            enc['neighbor_mask'][k]
+                        ].tolist()
+                    )
+
+                    nb_ious = []
+
+                    for ix in neighbor_indices:
+                        py, px = divmod(
+                            int(ix), OUTPUT_WIDTH
+                        )
+
+                        nb_ious.append(
+                            a3_wh_iou(
+                                wh_b[:, py, px],
+                                true_wh
+                            )
+                        )
+
+                    radii = {}
+
+                    for rad in (1, 2, 4):
+                        all_iou = []
+                        inside_iou = []
+
+                        for dx, dy in QC34_RADIUS_DIRECTIONS:
+                            px = gx + rad * dx
+                            py = gy + rad * dy
+
+                            if not (
+                                0 <= px < OUTPUT_WIDTH
+                                and 0 <= py < OUTPUT_HEIGHT
+                            ):
+                                continue
+
+                            v = a3_wh_iou(
+                                wh_b[:, py, px],
+                                true_wh
+                            )
+
+                            all_iou.append(v)
+
+                            if (
+                                bx[0] <= OUTPUT_STRIDE * (px + 0.5) <= bx[2]
+                                and
+                                bx[1] <= OUTPUT_STRIDE * (py + 0.5) <= bx[3]
+                            ):
+                                inside_iou.append(v)
+
+                        radii[f'r{rad}_all'] = (
+                            float(np.mean(all_iou))
+                            if all_iou else None
+                        )
+
+                        radii[f'r{rad}_inside'] = (
+                            float(np.mean(inside_iou))
+                            if inside_iou else None
+                        )
+
+                        radii[f'r{rad}_inside_count'] = (
+                            len(inside_iou)
+                        )
+
+                    # Local NMS peak within 3x3 around GT.
+                    loc = [
+                        float(peaks_b[label, py, px])
+                        for dx, dy in (
+                            QC34_RADIUS_DIRECTIONS
+                            + [(0, 0)]
+                        )
+                        for px, py in [
+                            (gx + dx, gy + dy)
+                        ]
+                        if (
+                            0 <= px < OUTPUT_WIDTH
+                            and 0 <= py < OUTPUT_HEIGHT
+                        )
+                    ]
+
+                    records.append({
+                        'id': f'{image_id}:{k}',
+                        'image_id': image_id,
+                        'gt_index': k,
+                        'class': label,
+                        'person': label == 0,
+                        'group': group,
+                        'radius_v12': radius,
+                        'radius_zero': radius == 0,
+                        'gt_area': area,
+                        'neighbor_n': len(nb_ious),
+
+                        'center_iou': a3_wh_iou(
+                            center_wh, true_wh
+                        ),
+
+                        'neighbor_iou': (
+                            float(np.mean(nb_ious))
+                            if nb_ious else None
+                        ),
+
+                        'center_wh_mae_cells': float(
+                            np.abs(
+                                center_wh - true_wh
+                            ).mean()
+                        ),
+
+                        'center_wh_bias_w': float(
+                            (center_wh[0] - true_wh[0])
+                            / max(true_wh[0], 2)
+                        ),
+
+                        'center_wh_bias_h': float(
+                            (center_wh[1] - true_wh[1])
+                            / max(true_wh[1], 2)
+                        ),
+
+                        'center_offset_mae_cells': float(
+                            np.abs(
+                                center_off - true_off
+                            ).mean()
+                        ),
+
+                        'center_box_iou': a3_xyxy_iou(
+                            a3_pred_box(
+                                (gx, gy),
+                                center_off,
+                                center_wh
+                            ),
+                            bx
+                        ),
+
+                        'center_wh_oracle_box_iou': a3_xyxy_iou(
+                            a3_pred_box(
+                                (gx, gy),
+                                center_off,
+                                true_wh
+                            ),
+                            bx
+                        ),
+
+                        'center_offset_oracle_box_iou': a3_xyxy_iou(
+                            a3_pred_box(
+                                (gx, gy),
+                                true_off,
+                                center_wh
+                            ),
+                            bx
+                        ),
+
+                        'gt_center_score': float(
+                            hm_b[label, gy, gx]
+                        ),
+
+                        'local_peak_r1_ge005': any(
+                            s >= 0.05 for s in loc
+                        ),
+
+                        'top100_r1_ge005': (
+                            top_dist is not None
+                            and top_dist <= 1
+                        ),
+
+                        'top100_r2_ge005': (
+                            top_dist is not None
+                            and top_dist <= 2
+                        ),
+
+                        'top100_r4_ge005': (
+                            top_dist is not None
+                            and top_dist <= 4
+                        ),
+
+                        'top100_nearest_r4_dist': top_dist,
+
+                        'matched_peak_wh_iou': matched_whoiou,
+                        'matched_peak_box_iou': matched_box_iou,
+                        'matched_peak_perfect_wh_box_iou': matched_gtwh_iou,
+                        'matched_peak_offset_mae_to_gt_center': matched_offset_mae,
+
+                        **radii,
+                    })
+
+    assert len(seen_images) == A3_QC_IMAGE_COUNT
+    assert len(records) > 0
+
+    assert len({
+        r['id'] for r in records
+    }) == len(records)
+
+    QC34_RECORDS[arm] = records
+
+    QC34_COUNTS[arm] = {
+        'images': len(seen_images),
+        'gt': len(records),
+        'eligible_neighbors_gt': sum(
+            r['neighbor_n'] > 0
+            for r in records
         ),
-        "offset_mae_cells": float(
-            np.mean(stat["off_abs"])
-        ),
-        "offset_constant_05_mae": float(
-            np.mean(stat["off05_abs"])
-        ),
-        "oracle_mean_iou": float(oracle.mean()),
-        "oracle_median_iou": float(np.median(oracle)),
-        "oracle_iou50_pct": float(
-            100 * np.mean(oracle >= .50)
-        ),
-        "oracle_iou75_pct": float(
-            100 * np.mean(oracle >= .75)
-        ),
-        "wh_nonpositive_gt_pct": float(
-            100 * np.mean(stat["wh_bad_gt"])
-        ),
-        "wh_nonpositive_top100_pct": float(
-            100 * np.mean(stat["wh_bad_top"])
-        ),
-        "offset_outside_top100_pct": float(
-            100 * np.mean(stat["off_bad_top"])
-        ),
-        "gt_class_score_median": float(
-            np.median(stat["gt_confidence"])
-        ),
-        "top100_score_median": float(
-            np.median(stat["top_confidence"])
-        )
     }
 
-    print("\nQC1:", name)
-    for key, value in qc1[name].items():
-        print(f"  {key}: {value}")
+    print(arm, QC34_COUNTS[arm])
 
-    del model
+    del net
     gc.collect()
     torch.cuda.empty_cache()
 
+assert (
+    [r['id'] for r in QC34_RECORDS['A2_control']]
+    ==
+    [r['id'] for r in QC34_RECORDS['A3_neighbor_R1']]
+)
 
-# ============================================================
-# VERIFY + SAVE
-# ============================================================
+a3_save_json(
+    'qc34_paired_gt_records.json',
+    QC34_RECORDS
+)
 
-assert len({
-    result["gt_count"]
-    for result in qc1.values()
-}) == 1
+a3_save_json(
+    'qc34_counts.json',
+    QC34_COUNTS
+)
 
-with open(
-    os.path.join(
-        QC_OUT,
-        "qc1_baseline_A1_A2_160k.json"
-    ),
-    "w",
-    encoding="utf-8"
-) as file:
-    json.dump(
-        qc1,
-        file,
-        indent=2,
-        allow_nan=False
-    )
-
-print("STEP 34 COMPLETE — NO TRAINING")
-print("Saved:", QC_OUT)
+print(
+    'STEP 34 PASS — paired GT records, '
+    'A2 continuation vs A3'
+)
