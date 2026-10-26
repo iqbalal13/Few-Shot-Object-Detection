@@ -1,148 +1,233 @@
 
 # ============================================================
-# STEP 40 — QC7: WH SPATIAL READOUT STABILITY
-# Eight directions at R1/R2/R4, fixed GT subset.
+# STEP 40 SUMMARY ADDENDUM — A3 VERSION
+# A2 CONTROL VS A3 NEIGHBOR R1
+# NO INFERENCE / NO TRAINING
 # ============================================================
 
-summary40 = {}
+import json
+import os
 
-for arm, rows in QC34_RECORDS.items():
-    summary40[arm] = {}
+assert "summary40" in globals(), (
+    "Run STEP 40 before this addendum."
+)
 
-    for group in (
-        'all', 'small', 'medium', 'large', 'person'
-    ):
-        rr = [
-            r for r in rows
-            if group == 'all'
-            or (
-                r['person'] if group == 'person'
-                else r['group'] == group
-            )
-        ]
+assert "A2_control" in summary40
+assert "A3_neighbor_R1" in summary40
 
-        summary40[arm][group] = {
-            'gt': len(rr),
+GROUPS40 = (
+    "all",
+    "small",
+    "medium",
+    "large",
+    "person"
+)
 
-            'center_iou_all_gt': a3_mean(
-                rr, 'center_iou'
-            )
-        }
+RADII40 = (1, 2, 4)
+LOCATIONS40 = ("all", "inside")
 
-        for rad in (1, 2, 4):
-            for location in ('all', 'inside'):
-                f = f'r{rad}_{location}'
+addendum40 = {
+    "experiment": "A3_R1_PILOT",
+    "comparison": "A3_neighbor_R1_minus_A2_control",
+    "groups": {}
+}
 
-                subset = [
-                    r for r in rr
-                    if r[f] is not None
-                ]
+print("=" * 76)
+print("STEP 40 ADDENDUM — A2 VS A3")
+print("WH SPATIAL ROBUSTNESS")
+print("=" * 76)
 
-                summary40[arm][group][
-                    f'{f}_n'
-                ] = len(subset)
+for group in GROUPS40:
 
-                summary40[arm][group][
-                    f'{f}_mean_iou'
-                ] = a3_mean(subset, f)
+    a2 = summary40["A2_control"][group]
+    a3 = summary40["A3_neighbor_R1"][group]
 
-                summary40[arm][group][
-                    f'{f}_center_mean_same_gt'
-                ] = a3_mean(
-                    subset, 'center_iou'
-                )
-
-                summary40[arm][group][
-                    f'{f}_gap_from_center'
-                ] = (
-                    float(np.mean([
-                        r[f] - r['center_iou']
-                        for r in subset
-                    ]))
-                    if subset else None
-                )
-
-        eligible = [
-            r for r in rr
-            if r['neighbor_n'] > 0
-        ]
-
-        summary40[arm][group][
-            'eligible_GT'
-        ] = len(eligible)
-
-        summary40[arm][group][
-            'eligible_center_iou'
-        ] = a3_mean(
-            eligible, 'center_iou'
-        )
-
-        summary40[arm][group][
-            'eligible_neighbor_iou'
-        ] = a3_mean(
-            eligible, 'neighbor_iou'
-        )
-
-for group in (
-    'all', 'small', 'medium', 'large', 'person'
-):
-    a = summary40['A2_control'][group]
-    b = summary40['A3_neighbor_R1'][group]
-
-    assert a['gt'] == b['gt']
-
-    print(
-        '\n', group,
-        'GT=', a['gt']
+    assert a2["gt"] == a3["gt"], (
+        f"GT mismatch: {group}"
     )
 
+    result = {
+        "gt": int(a2["gt"]),
+        "center": {},
+        "neighbor_eligible": {},
+        "radii": {}
+    }
+
+    print("\n" + "-" * 76)
     print(
-        'center Δ',
-        round(
-            b['center_iou_all_gt']
-            - a['center_iou_all_gt'],
-            6
-        )
+        f"GROUP: {group.upper()} | "
+        f"GT={a2['gt']}"
     )
 
-    for rad in (1, 2, 4):
-        for where in ('all', 'inside'):
-            prefix = f'r{rad}_{where}'
+    # ========================================================
+    # CENTER WH IOU
+    # ========================================================
 
-            ak = a[f'{prefix}_mean_iou']
-            bk = b[f'{prefix}_mean_iou']
+    a2_center = a2["center_iou_all_gt"]
+    a3_center = a3["center_iou_all_gt"]
 
-            if ak is None or bk is None:
+    result["center"] = {
+        "A2": a2_center,
+        "A3": a3_center,
+        "delta": a3_center - a2_center
+    }
+
+    print(
+        f"WH @ GT center: "
+        f"A2={a2_center:.6f} | "
+        f"A3={a3_center:.6f} | "
+        f"Delta={a3_center-a2_center:+.6f}"
+    )
+
+    # ========================================================
+    # RADIUS 1, 2, 4
+    # ========================================================
+
+    for radius in RADII40:
+
+        result["radii"][str(radius)] = {}
+
+        for location in LOCATIONS40:
+
+            prefix = f"r{radius}_{location}"
+
+            count_key = f"{prefix}_n"
+            mean_key = f"{prefix}_mean_iou"
+            gap_key = f"{prefix}_gap_from_center"
+
+            assert a2[count_key] == a3[count_key], (
+                f"Sample mismatch: {group}, {prefix}"
+            )
+
+            a2_mean = a2[mean_key]
+            a3_mean = a3[mean_key]
+
+            if a2_mean is None or a3_mean is None:
+                result["radii"][str(radius)][location] = {
+                    "n": int(a2[count_key]),
+                    "A2": None,
+                    "A3": None,
+                    "delta": None
+                }
                 continue
 
-            assert (
-                a[f'{prefix}_n']
-                == b[f'{prefix}_n']
-            )
+            delta = a3_mean - a2_mean
+
+            a2_gap = a2[gap_key]
+            a3_gap = a3[gap_key]
+
+            result["radii"][str(radius)][location] = {
+                "n": int(a2[count_key]),
+                "A2": a2_mean,
+                "A3": a3_mean,
+                "delta": delta,
+                "A2_gap_from_center": a2_gap,
+                "A3_gap_from_center": a3_gap,
+                "delta_gap_from_center": (
+                    a3_gap - a2_gap
+                    if a2_gap is not None
+                    and a3_gap is not None
+                    else None
+                )
+            }
 
             print(
-                prefix,
-                'N', a[f'{prefix}_n'],
-                'A2', round(ak, 5),
-                'A3', round(bk, 5),
-                'delta', round(bk - ak, 6)
+                f"R{radius:<2} {location:<6} | "
+                f"N={a2[count_key]:5d} | "
+                f"A2={a2_mean:.6f} | "
+                f"A3={a3_mean:.6f} | "
+                f"Delta={delta:+.6f}"
             )
 
-    print(
-        'A3 neighbor-eligible gain',
-        round(
-            b['eligible_neighbor_iou']
-            - a['eligible_neighbor_iou'],
-            6
-        )
+    # ========================================================
+    # NEIGHBOR ELIGIBLE OBJECTS
+    # ========================================================
+
+    assert (
+        a2["eligible_GT"]
+        == a3["eligible_GT"]
     )
 
-a3_save_json(
-    'qc40_spatial_robustness_r1_r2_r4.json',
-    summary40
+    eligible_n = int(a2["eligible_GT"])
+
+    neighbor_a2 = a2["eligible_neighbor_iou"]
+    neighbor_a3 = a3["eligible_neighbor_iou"]
+
+    eligible_center_a2 = a2["eligible_center_iou"]
+    eligible_center_a3 = a3["eligible_center_iou"]
+
+    result["neighbor_eligible"] = {
+        "gt": eligible_n,
+        "neighbor_A2": neighbor_a2,
+        "neighbor_A3": neighbor_a3,
+        "neighbor_delta": (
+            neighbor_a3 - neighbor_a2
+            if neighbor_a2 is not None
+            and neighbor_a3 is not None
+            else None
+        ),
+        "center_A2": eligible_center_a2,
+        "center_A3": eligible_center_a3,
+        "center_delta": (
+            eligible_center_a3 - eligible_center_a2
+            if eligible_center_a2 is not None
+            and eligible_center_a3 is not None
+            else None
+        )
+    }
+
+    print(
+        f"\nEligible GT: {eligible_n}"
+    )
+
+    if neighbor_a2 is not None and neighbor_a3 is not None:
+        print(
+            f"Eligible-neighbor WH IoU: "
+            f"A2={neighbor_a2:.6f} | "
+            f"A3={neighbor_a3:.6f} | "
+            f"Delta={neighbor_a3-neighbor_a2:+.6f}"
+        )
+
+    addendum40["groups"][group] = result
+
+
+# ============================================================
+# FINAL INTEGRITY CHECK
+# ============================================================
+
+assert (
+    addendum40["groups"]["all"]["gt"]
+    == 7117
+), "Unexpected 1000-image GT population"
+
+assert (
+    addendum40["groups"]["all"]["neighbor_eligible"]["gt"]
+    == 4159
+), "Unexpected eligible-neighbor GT population"
+
+# ============================================================
+# SAVE
+# ============================================================
+
+OUTPUT40_ADDENDUM = os.path.join(
+    A3_QC_DIR,
+    "qc40_addendum_A2_vs_A3.json"
 )
 
-print(
-    'STEP 40 PASS — directions are diagnostic only, '
-    'not actual detector matching'
-)
+with open(
+    OUTPUT40_ADDENDUM,
+    "w",
+    encoding="utf-8"
+) as f:
+    json.dump(
+        addendum40,
+        f,
+        indent=2,
+        allow_nan=False
+    )
+
+print("\n" + "=" * 76)
+print("STEP 40 ADDENDUM PASS")
+print("NO INFERENCE / NO TRAINING")
+print("Saved:", OUTPUT40_ADDENDUM)
+print("=" * 76)
