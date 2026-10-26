@@ -1,145 +1,83 @@
-# ============================================================
-# STEP 10 — IMAGE & BBOX PREPROCESSING
-# ============================================================
 
-from PIL import Image
-import numpy as np
-import torch
+# STEP 4 — B2 CONFIG; keep A2 V1.2 loss/targets
+import os
 
-print("=" * 70)
-print("STEP 10 — PREPROCESSING SETUP")
-print("=" * 70)
+CONFIG = {
+    "experiment_name": "CenterNet_COCO80_B2_C3C4_GATED_PILOT_FROM_A2_160K",
+    "backbone": "resnet101",
+    "backbone_pretrained": True,
+    "num_classes": 80,
+    "input_size": 640,
+    "output_stride": 4,
+    "batch_size": 8,
+    "num_workers": 8,
+    "persistent_workers": True,
+    "prefetch_factor": 4,
+    "encoded_num_workers": 4,
+    "encoded_prefetch_factor": 2,
 
-INPUT_SIZE = CONFIG["input_size"]
+    "learning_rate": 1e-4,
+    "weight_decay": 1e-4,
+    "grad_clip_norm": 10.0,
+    "precision": "bfloat16",
 
-IMAGENET_MEAN = np.array(
-    [0.485, 0.456, 0.406],
-    dtype=np.float32
-)
+    "source_epochs": 20,
+    "source_images_total": 160000,
+    "source_images_per_epoch": 8000,
+    "source_images_per_class_per_epoch": 100,
+    "source_sampling_policy": "class-balanced-multiclass",
+    "source_manifest_seed_offset": 3000,
 
-IMAGENET_STD = np.array(
-    [0.229, 0.224, 0.225],
-    dtype=np.float32
-)
+    "train_horizontal_flip_p": 0.0,
+    "gaussian_radius_mode": "v1_2_original",
+    "gaussian_min_overlap": 0.7,
 
+    "wh_loss_type": "hybrid_abs_relative",
+    "wh_absolute_fraction": 0.75,
+    "wh_relative_fraction": 0.25,
+    "wh_relative_eps": 2.0,
+    "wh_relative_beta": 0.20,
+    "wh_relative_scale": 10.0,
 
-def preprocess_image_and_boxes(image, boxes, input_size=INPUT_SIZE):
-    """
-    image:
-        PIL RGB image
+    # A3 targets remain compatible, but its loss is disabled.
+    "a3_neighbor_radius": 1,
+    "a3_neighbor_lambda": 0.0,
 
-    boxes:
-        numpy array [N, 4]
-        format xyxy in original image coordinates
+    # B2 experiment
+    "b2_pilot_epochs": 2,
+    "b2_base_lr": 2e-5,
+    "b2_lateral_lr": 1e-4,
+    "b2_eta_min": 2e-6,
+    "b2_gate_init": 0.0,
 
-    Returns:
-        image_tensor : [3, input_size, input_size]
-        boxes_new     : [N, 4] in resized/padded coordinates
-        meta          : resize information
-    """
+    "best_checkpoint_metric": "official_COCO_mAP_50_95",
+    "use_fused_adamw": False,
+    "use_channels_last": False,
+    "run_engineering_sanity": False,
+    "run_tiny_overfit_diagnostic": False,
+    "debug_finite_checks": False,
+    "progress_every": 100,
+    "score_threshold": 0.50,
+    "iou_threshold": 0.50,
+    "seed": SEED,
+    "data_root": "/content/coco",
+    "checkpoint_root": "/content/checkpoints_centernet",
+    "max_objects": 128,
+}
 
-    original_w, original_h = image.size
+for key, relative in {
+    "train_images": "train2017",
+    "val_images": "val2017",
+    "train_annotations": "annotations/instances_train2017.json",
+    "val_annotations": "annotations/instances_val2017.json",
+}.items():
+    CONFIG[key] = os.path.join(CONFIG["data_root"], relative)
 
-    scale = min(
-        input_size / original_w,
-        input_size / original_h
-    )
+os.makedirs(CONFIG["data_root"], exist_ok=True)
+os.makedirs(CONFIG["checkpoint_root"], exist_ok=True)
 
-    resized_w = int(round(original_w * scale))
-    resized_h = int(round(original_h * scale))
+assert CONFIG["gaussian_radius_mode"] == "v1_2_original"
+assert CONFIG["a3_neighbor_lambda"] == 0.0
+assert CONFIG["wh_loss_type"] == "hybrid_abs_relative"
 
-    resized = image.resize(
-        (resized_w, resized_h),
-        Image.Resampling.BILINEAR
-    )
-
-    canvas = Image.new(
-        "RGB",
-        (input_size, input_size),
-        color=(114, 114, 114)
-    )
-
-    pad_x = (input_size - resized_w) // 2
-    pad_y = (input_size - resized_h) // 2
-
-    canvas.paste(
-        resized,
-        (pad_x, pad_y)
-    )
-
-    boxes = np.asarray(
-        boxes,
-        dtype=np.float32
-    ).reshape(-1, 4)
-
-    boxes_new = boxes.copy()
-
-    if len(boxes_new) > 0:
-
-        boxes_new[:, [0, 2]] *= scale
-        boxes_new[:, [1, 3]] *= scale
-
-        boxes_new[:, [0, 2]] += pad_x
-        boxes_new[:, [1, 3]] += pad_y
-
-        boxes_new[:, [0, 2]] = np.clip(
-            boxes_new[:, [0, 2]],
-            0,
-            input_size - 1
-        )
-
-        boxes_new[:, [1, 3]] = np.clip(
-            boxes_new[:, [1, 3]],
-            0,
-            input_size - 1
-        )
-
-    image_np = np.asarray(
-        canvas,
-        dtype=np.float32
-    ) / 255.0
-
-    image_np = (
-        image_np - IMAGENET_MEAN
-    ) / IMAGENET_STD
-
-    image_tensor = torch.from_numpy(
-        image_np
-    ).permute(2, 0, 1).float()
-
-    meta = {
-        "original_size": (original_h, original_w),
-        "resized_size": (resized_h, resized_w),
-        "scale": scale,
-        "pad_x": pad_x,
-        "pad_y": pad_y,
-    }
-
-    return image_tensor, boxes_new, meta
-
-
-def denormalize_image(image_tensor):
-
-    image = image_tensor.detach().cpu().permute(1, 2, 0).numpy()
-
-    image = (
-        image * IMAGENET_STD
-        + IMAGENET_MEAN
-    )
-
-    image = np.clip(
-        image,
-        0.0,
-        1.0
-    )
-
-    return image
-
-
-print("Input size     :", INPUT_SIZE)
-print("Resize method  : letterbox")
-print("Aspect ratio   : preserved")
-print("Normalization  : ImageNet")
-print("Output tensor  : [3, 640, 640]")
-
-print("\nSTEP 10 PASSED")
+print("STEP 4 PASS: B2 isolated architecture pilot")
