@@ -1,218 +1,105 @@
 
 # ============================================================
-# STEP 37 — QC4 / FULL OFFICIAL COCOeval
-# BASELINE, A1, A2, B1
-# ALL 5000 COCO-VAL IMAGES / NO TRAINING
+# STEP 37 — QC4: OFFICIAL COCOeval FINAL PAIR COMPARISON
+# Reuses Step 31 official 5000-image evaluation.
 # ============================================================
 
-import os
-import json
+metric_names = (
+    'mAP_50_95',
+    'AP50',
+    'AP75',
+    'AP_small',
+    'AP_medium',
+    'AP_large',
+    'AR1',
+    'AR10',
+    'AR100',
+    'AR_small',
+    'AR_medium',
+    'AR_large'
+)
 
-assert callable(evaluate_official_checkpoint)
+person_names = (
+    'person_AP_50_95',
+    'person_AP50',
+    'person_AP75'
+)
 
-q4_paths = {
-    "Baseline_V12_160K": QC_BASE160,
-    "Experiment_A1_160K": QC_A1_160,
-
-    "Experiment_A2_40K": os.path.join(
-        QC_A2_DIR, "epoch5_40k.pth"
+summary37 = {
+    'protocol': (
+        'COCO bbox official 5000-image, K100, '
+        'A2 and A3 each +16K from same A2 160K checkpoint'
     ),
-    "Experiment_A2_80K": os.path.join(
-        QC_A2_DIR, "epoch10_80k.pth"
-    ),
-    "Experiment_A2_120K": os.path.join(
-        QC_A2_DIR, "epoch15_120k.pth"
-    ),
-    "Experiment_A2_160K": QC_A2_160,
-    "Experiment_A2_best": os.path.join(
-        QC_A2_DIR, "centernet_coco80_best.pth"
-    ),
-
-    "Experiment_B1_160K": QC_B1_160
+    'models': {},
+    'delta_A3_minus_A2_percentage_points': {}
 }
 
-baseline200 = os.path.join(
-    "/content/drive/MyDrive",
-    "CenterNet_COCO80_V12_FRESH_200K_BS8",
-    "epoch25_200k.pth"
-)
+for arm in A3_ARMS:
+    item = results31[arm]
 
-if os.path.isfile(baseline200):
-    q4_paths[
-        "Historical_V12_200K_reference"
-    ] = baseline200
+    assert int(item['images']) == 5000
 
-for name, path in q4_paths.items():
-    assert os.path.isfile(path), f"Missing {name}: {path}"
-
-assert (
-    os.path.abspath(q4_paths["Experiment_A2_160K"])
-    != os.path.abspath(q4_paths["Experiment_B1_160K"])
-)
-
-assert (
-    os.path.abspath(q4_paths["Experiment_A2_best"])
-    != os.path.abspath(BEST_CHECKPOINT)
-)
-
-# Prevent a previous run's cached results from being reused.
-assert "OFFICIAL_COCO_CACHE" in globals()
-OFFICIAL_COCO_CACHE.clear()
-
-q4 = {}
-
-for name, path in q4_paths.items():
-
-    print("\nEvaluating:", name)
-
-    q4[name] = evaluate_official_checkpoint(
-        path, name
+    assert (
+        os.path.abspath(item['checkpoint'])
+        ==
+        os.path.abspath(A3_ARMS[arm])
     )
 
-    value = q4[name]["metrics"]["mAP_50_95"]
-
-    print(
-        f"COCOeval {name}: "
-        f"mAP={100 * value:.4f}%"
-    )
-
-
-# ============================================================
-# METRIC TABLE
-# ============================================================
-
-metric_keys = (
-    "mAP_50_95",
-    "AP50",
-    "AP75",
-    "AP95",
-    "AP_small",
-    "AP_medium",
-    "AP_large",
-    "AR1",
-    "AR10",
-    "AR100",
-    "AR_small",
-    "AR_medium",
-    "AR_large"
-)
-
-print("\nOFFICIAL COCO METRICS — PERCENT")
+    summary37['models'][arm] = {
+        'images': item['images'],
+        'checkpoint': item['checkpoint'],
+        'metrics': item['metrics'],
+        'person_metrics': item['person_metrics'],
+    }
 
 print(
-    f'{"Metric":<19}'
-    + "".join(
-        f"{name:>23}"
-        for name in q4
-    )
+    'OFFICIAL COCOeval — both arms '
+    'after +16K exposures:'
 )
 
-for key in metric_keys:
-    print(
-        f"{key:<19}"
-        + "".join(
-            f'{100 * q4[name]["metrics"][key]:23.4f}'
-            for name in q4
-        )
+for key in metric_names + person_names:
+    group = (
+        'person_metrics'
+        if key in person_names
+        else 'metrics'
     )
 
+    a = results31[
+        'A2_control'
+    ][group][key]
 
-# ============================================================
-# AP BY IOU THRESHOLD
-# ============================================================
+    b = results31[
+        'A3_neighbor_R1'
+    ][group][key]
 
-print("\nAP PER IoU THRESHOLD — PERCENT")
+    assert a is not None and b is not None
 
-for threshold in range(50, 100, 5):
-    key = f"{threshold / 100:.2f}"
+    delta = 100 * (b - a)
+
+    summary37[
+        'delta_A3_minus_A2_percentage_points'
+    ][key] = delta
 
     print(
-        f"{key:<19}"
-        + "".join(
-            f'{100 * q4[name]["AP_by_IoU"][key]:23.4f}'
-            for name in q4
-        )
+        f'{key:<24} '
+        f'A2={100*a:8.4f}% '
+        f'A3={100*b:8.4f}% '
+        f'Δ={delta:+8.4f} pp'
     )
 
+summary37['historical_note'] = (
+    'Historical A2 160K ~14.3732% and '
+    'B1 160K ~13.7688% are separate runs. '
+    'Do not use them as same-exposure '
+    'controls for A3 +16K.'
+)
 
-# ============================================================
-# PAIRWISE COMPARISONS
-# ============================================================
-
-baseline_metrics = q4[
-    "Baseline_V12_160K"
-]["metrics"]
-
-a1_metrics = q4[
-    "Experiment_A1_160K"
-]["metrics"]
-
-a2_metrics = q4[
-    "Experiment_A2_160K"
-]["metrics"]
-
-b1_metrics = q4[
-    "Experiment_B1_160K"
-]["metrics"]
-
-for title, left, right in (
-    ("A1 - BASELINE", baseline_metrics, a1_metrics),
-    ("A2 - BASELINE", baseline_metrics, a2_metrics),
-    ("A2 - A1", a1_metrics, a2_metrics),
-    ("B1 - A2", a2_metrics, b1_metrics)
-):
-
-    print(f"\n{title} (percentage points)")
-
-    for key in metric_keys:
-        difference = 100 * (
-            right[key] - left[key]
-        )
-
-        print(
-            f"{key:<19}: {difference:+.4f} pp"
-        )
-
+a3_save_json(
+    'qc37_official_cocoeval_A2_vs_A3.json',
+    summary37
+)
 
 print(
-    "\nBest A2 checkpoint epoch:",
-    q4["Experiment_A2_best"]["epoch"]
+    'STEP 37 PASS — authoritative '
+    'end-to-end metrics'
 )
-
-
-# ============================================================
-# SAVE RESULTS
-# ============================================================
-
-result37 = {
-    "models": q4,
-    "primary_comparison": [
-        "Baseline_V12_160K",
-        "Experiment_A1_160K",
-        "Experiment_A2_160K",
-        "Experiment_B1_160K"
-    ],
-    "description": (
-        "Official COCOeval bbox. "
-        "Primary comparison uses fixed "
-        "epoch-20 checkpoints."
-    )
-}
-
-with open(
-    os.path.join(
-        QC_OUT,
-        "qc4_coco_baseline_A1_A2_B1_160k.json"
-    ),
-    "w",
-    encoding="utf-8"
-) as file:
-    json.dump(
-        result37,
-        file,
-        indent=2,
-        allow_nan=False
-    )
-
-print("STEP 37 COMPLETE — NO TRAINING")
-print("Saved:", QC_OUT)
