@@ -1,134 +1,96 @@
-# ============================================================
-# STEP 25 — LOSS + BACKWARD / GRADIENT SANITY TEST
-# ============================================================
 
-print("=" * 70)
-print("STEP 25 — BACKWARD / GRADIENT SANITY TEST")
-print("=" * 70)
+# STEP 25 — B2 gradient checks
+import torch
+
+assert criterion.neighbor_lambda == 0.0
 
 model.train()
 
-batch_images, batch_targets = next(
-    iter(train_loader)
+for module in model.backbone.modules():
+    if isinstance(module, torch.nn.BatchNorm2d):
+        module.eval()
+
+images, raw = next(iter(train_loader))
+x = images.to(device)
+
+target = build_batch_centernet_targets(
+    raw, device
 )
 
-# Batch size 1 for safe Colab sanity test
-sanity_images = batch_images[:1].to(
-    device,
-    non_blocking=True
+optimizer_test = torch.optim.AdamW(
+    [{
+        "params": [
+            model.neck.gate_c3,
+            model.neck.gate_c4
+        ],
+        "lr": 1e-3
+    }],
+    weight_decay=0.0
 )
 
-sanity_targets_raw = batch_targets[:1]
+for iteration in range(2):
+    model.zero_grad(set_to_none=True)
 
-encoded_targets = \
-    build_batch_centernet_targets(
-        sanity_targets_raw,
-        device=device
+    with torch.amp.autocast(
+        "cuda",
+        dtype=torch.bfloat16
+    ):
+        out = model(x)
+
+    loss = criterion(
+        out, target
+    )["loss_total"]
+
+    assert bool(torch.isfinite(loss))
+
+    loss.backward()
+
+    g3 = model.neck.gate_c3.grad
+    g4 = model.neck.gate_c4.grad
+
+    assert g3 is not None and g4 is not None
+    assert bool(torch.isfinite(g3))
+    assert bool(torch.isfinite(g4))
+
+    print(
+        "iteration", iteration,
+        "gate gradients",
+        float(g3),
+        float(g4)
     )
 
-model.zero_grad(
-    set_to_none=True
-)
+    if iteration == 1:
+        for mod in (
+            model.neck.lateral_c3,
+            model.neck.lateral_c4
+        ):
+            assert mod.weight.grad is not None
+            assert bool(
+                torch.isfinite(mod.weight.grad).all()
+            )
 
-outputs = model(
-    sanity_images
-)
+    if iteration == 0:
+        optimizer_test.step()
 
-losses = criterion(
-    outputs,
-    encoded_targets
-)
+        # Ensure nonzero gate in this isolated test.
+        with torch.no_grad():
+            if abs(model.neck.gate_c3.item()) < 1e-9:
+                model.neck.gate_c3.fill_(1e-3)
 
-total_loss = losses[
-    "loss_total"
-]
+            if abs(model.neck.gate_c4.item()) < 1e-9:
+                model.neck.gate_c4.fill_(1e-3)
 
-print(
-    "Heatmap loss :",
-    float(
-        losses["loss_heatmap"].detach()
-    )
-)
+# Restore initialization.
+# Actual training will separately load A2 checkpoint.
+with torch.no_grad():
+    model.neck.gate_c3.zero_()
+    model.neck.gate_c4.zero_()
 
-print(
-    "WH loss      :",
-    float(
-        losses["loss_wh"].detach()
-    )
-)
+model.zero_grad(set_to_none=True)
 
-print(
-    "Offset loss  :",
-    float(
-        losses["loss_offset"].detach()
-    )
-)
-
-print(
-    "Total loss   :",
-    float(
-        total_loss.detach()
-    )
-)
-
-
-assert torch.isfinite(
-    total_loss
-), "Loss contains NaN or Inf"
-
-
-total_loss.backward()
-
-
-grad_tensors = 0
-finite_grad_tensors = 0
-nonzero_grad_tensors = 0
-
-for parameter in model.parameters():
-
-    if parameter.grad is None:
-        continue
-
-    grad_tensors += 1
-
-    if torch.isfinite(
-        parameter.grad
-    ).all():
-
-        finite_grad_tensors += 1
-
-    if parameter.grad.abs().sum() > 0:
-
-        nonzero_grad_tensors += 1
-
-
-print("\nGradient tensors       :", grad_tensors)
-print("Finite gradient tensors:", finite_grad_tensors)
-print("Non-zero gradients     :", nonzero_grad_tensors)
-
-assert grad_tensors > 0
-
-assert (
-    finite_grad_tensors
-    == grad_tensors
-), "Non-finite gradients detected"
-
-assert (
-    nonzero_grad_tensors > 0
-), "No non-zero gradient detected"
-
-
-model.zero_grad(
-    set_to_none=True
-)
-
-del outputs
-del losses
-del total_loss
-del encoded_targets
-del sanity_images
+del optimizer_test, images, raw, x, target, out, loss
 
 if torch.cuda.is_available():
     torch.cuda.empty_cache()
 
-print("\nSTEP 25 PASSED")
+print("STEP 25 PASS — gates and lateral paths differentiable")
