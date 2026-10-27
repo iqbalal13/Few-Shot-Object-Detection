@@ -1,214 +1,276 @@
 
-# STEP 31 — OFFICIAL COCOeval A2 VS A3
-import os,math,json,io,contextlib,gc
+# STEP 31 — Official COCO bbox evaluation A2 vs B2
+
+import os
+import math
+import json
+import io
+import contextlib
+import gc
 import numpy as np
 import torch
+
 from pycocotools.cocoeval import COCOeval
 
-assert len(val_dataset)==5000
+assert len(val_dataset) == 5000
 
-source_val_loader,_=build_val_loader(
-    SEED+3301,encoded=True
+source_val_loader, _ = build_val_loader(
+    SEED + 3301,
+    encoded=True
 )
-assert len(source_val_loader)==625
 
-def eval31(path,label):
-    ck=torch.load(
-        path,map_location="cpu",weights_only=False
+assert len(source_val_loader) == 625
+
+B2_CKPT = os.path.join(
+    B2_DIR,
+    "epoch2_add16k.pth"
+)
+
+paths = {
+    "A2_control": A2_CONTROL_CKPT,
+    B2_ARM: B2_CKPT
+}
+
+
+def b2_official_eval(path, arm):
+    ck = torch.load(
+        path,
+        map_location="cpu",
+        weights_only=False
     )
 
-    assert ck["arm"]==label
-    assert ck["additional_exposures"]==16000
-    assert ck["gaussian_radius_mode"]=="v1_2_original"
+    assert ck["arm"] == arm
+    assert int(ck["additional_exposures"]) == 16000
+    assert ck["gaussian_radius_mode"] == "v1_2_original"
 
-    model_eval=CenterNetResNet101(
+    net = CenterNetResNet101(
         num_classes=80,
         pretrained_backbone=False
     ).to(device)
 
-    model_eval.load_state_dict(
-        ck["model_state_dict"],strict=True
-    )
-    model_eval.eval()
+    if arm == "A2_control":
+        load_a2_into_b2(
+            net,
+            ck["model_state_dict"]
+        )
+    else:
+        net.load_state_dict(
+            ck["model_state_dict"],
+            strict=True
+        )
 
-    detections=[]
-    seen=set()
+    net.eval()
+    detections = []
+    seen = set()
 
     with torch.inference_mode():
-        for batch in source_val_loader:
-            images,targets=batch[0],batch[1]
-
+        for images, targets, _ in source_val_loader:
             with torch.amp.autocast(
-                "cuda",dtype=torch.bfloat16
+                "cuda",
+                dtype=torch.bfloat16
             ):
-                raw=model_eval(
-                    images.to(device,non_blocking=True)
+                outputs = net(
+                    images.to(
+                        device,
+                        non_blocking=True
+                    )
                 )
 
-            predictions=decode_centernet(
-                {k:v.float() for k,v in raw.items()},
-                K=100,score_threshold=0.
+            batch_predictions = decode_centernet(
+                {
+                    k: v.float()
+                    for k, v in outputs.items()
+                },
+                K=100,
+                score_threshold=0.0
             )
 
-            for pred,t in zip(predictions,targets):
-                image_id=int(t["image_id"])
+            for pred, t in zip(
+                batch_predictions,
+                targets
+            ):
+                image_id = int(t["image_id"])
+
                 assert image_id not in seen
                 seen.add(image_id)
 
-                scale=float(t["scale"])
-                px,py=map(float,t["pad"].tolist())
-                H,W=map(int,t["original_size"].tolist())
+                scale = float(t["scale"])
+                px, py = map(
+                    float,
+                    t["pad"].tolist()
+                )
 
-                boxes=pred["boxes"].detach().cpu().float().clone()
+                H, W = map(
+                    int,
+                    t["original_size"].tolist()
+                )
 
-                boxes[:,[0,2]]=(
-                    (boxes[:,[0,2]]-px)/scale
-                ).clamp(0,W)
+                boxes = (
+                    pred["boxes"]
+                    .detach()
+                    .cpu()
+                    .float()
+                    .clone()
+                )
 
-                boxes[:,[1,3]]=(
-                    (boxes[:,[1,3]]-py)/scale
-                ).clamp(0,H)
+                boxes[:, [0, 2]] = (
+                    (boxes[:, [0, 2]] - px) / scale
+                ).clamp(0, W)
 
-                scores=pred["scores"].detach().cpu().tolist()
-                labels=pred["labels"].detach().cpu().tolist()
+                boxes[:, [1, 3]] = (
+                    (boxes[:, [1, 3]] - py) / scale
+                ).clamp(0, H)
 
-                for bb,sc,cls in zip(
-                    boxes.tolist(),scores,labels
+                for bb, score, cl in zip(
+                    boxes.tolist(),
+                    pred["scores"].detach().cpu().tolist(),
+                    pred["labels"].detach().cpu().tolist()
                 ):
-                    x1,y1,x2,y2=map(float,bb)
+                    x1, y1, x2, y2 = map(float, bb)
 
                     if (
-                        x2<=x1 or y2<=y1
-                        or not math.isfinite(sc)
+                        x2 <= x1
+                        or y2 <= y1
+                        or not math.isfinite(score)
                     ):
                         continue
 
                     detections.append({
-                        "image_id":image_id,
-                        "category_id":int(
-                            val_dataset.cat_ids[int(cls)]
+                        "image_id": image_id,
+                        "category_id": int(
+                            val_dataset.cat_ids[int(cl)]
                         ),
-                        "bbox":[
-                            x1,y1,x2-x1,y2-y1
+                        "bbox": [
+                            x1,
+                            y1,
+                            x2 - x1,
+                            y2 - y1
                         ],
-                        "score":float(sc)
+                        "score": float(score)
                     })
 
-    assert seen==set(map(int,val_dataset.image_ids))
+    assert seen == set(
+        map(int, val_dataset.image_ids)
+    )
 
     with contextlib.redirect_stdout(io.StringIO()):
-        dt=val_dataset.coco.loadRes(detections)
+        dt = val_dataset.coco.loadRes(detections)
 
-        ce=COCOeval(
-            val_dataset.coco,dt,iouType="bbox"
+        ce = COCOeval(
+            val_dataset.coco,
+            dt,
+            iouType="bbox"
         )
 
-        ce.params.imgIds=sorted(
-            map(int,val_dataset.image_ids)
+        ce.params.imgIds = sorted(seen)
+        ce.params.catIds = sorted(
+            map(int, val_dataset.cat_ids)
         )
-        ce.params.catIds=sorted(
-            map(int,val_dataset.cat_ids)
+        ce.params.maxDets = [1, 10, 100]
+        ce.params.iouThrs = np.linspace(
+            0.5, 0.95, 10
         )
-        ce.params.maxDets=[1,10,100]
-        ce.params.iouThrs=np.linspace(.5,.95,10)
 
         ce.evaluate()
         ce.accumulate()
         ce.summarize()
 
-    names=(
-        "mAP_50_95","AP50","AP75",
-        "AP_small","AP_medium","AP_large",
-        "AR1","AR10","AR100",
-        "AR_small","AR_medium","AR_large"
+    names = (
+        "mAP_50_95",
+        "AP50",
+        "AP75",
+        "AP_small",
+        "AP_medium",
+        "AP_large",
+        "AR1",
+        "AR10",
+        "AR100",
+        "AR_small",
+        "AR_medium",
+        "AR_large"
     )
 
-    metrics=dict(zip(names,map(float,ce.stats)))
+    metrics = dict(
+        zip(names, map(float, ce.stats))
+    )
 
-    prec=ce.eval["precision"]
-    person_idx=ce.params.catIds.index(1)
+    person_pos = ce.params.catIds.index(1)
 
-    pi=prec[
-        :,:,person_idx,
-        ce.params.areaRngLbl.index("all"),2
+    precision = ce.eval["precision"][
+        :, :,
+        person_pos,
+        ce.params.areaRngLbl.index("all"),
+        2
     ]
 
-    def positive_mean(v):
-        good=v[v>=0]
-        return float(good.mean()) if len(good) else None
+    def valid_mean(v):
+        v = v[v >= 0]
+        return (
+            float(v.mean())
+            if len(v) > 0 else None
+        )
 
-    person={
-        "person_AP_50_95":positive_mean(pi),
-        "person_AP50":positive_mean(pi[0]),
-        "person_AP75":positive_mean(pi[5])
+    person = {
+        "person_AP_50_95": valid_mean(precision),
+        "person_AP50": valid_mean(precision[0]),
+        "person_AP75": valid_mean(precision[5])
     }
 
-    result={
-        "label":label,
-        "checkpoint":path,
-        "images":len(seen),
-        "detections":len(detections),
-        "metrics":metrics,
-        "person_metrics":person
+    result = {
+        "arm": arm,
+        "checkpoint": path,
+        "images": len(seen),
+        "detections": len(detections),
+        "metrics": metrics,
+        "person_metrics": person
     }
 
-    del model_eval,ce,ck
+    del net, ck, ce
     gc.collect()
     torch.cuda.empty_cache()
+
     return result
 
-paths={
-    "A2_control":os.path.join(
-        PILOT_ROOT,"A2_control","epoch2_add16k.pth"
-    ),
-    "A3_neighbor_R1":os.path.join(
-        PILOT_ROOT,"A3_neighbor_R1","epoch2_add16k.pth"
-    )
+
+results31 = {
+    arm: b2_official_eval(path, arm)
+    for arm, path in paths.items()
 }
 
-results31={}
+for field in results31["A2_control"]["metrics"]:
+    a = results31["A2_control"]["metrics"][field]
+    b = results31[B2_ARM]["metrics"][field]
 
-for name,path in paths.items():
-    assert os.path.isfile(path),path
-    print("Evaluating:",name)
-
-    results31[name]=eval31(path,name)
-
-    print(results31[name]["metrics"])
-    print(results31[name]["person_metrics"])
-
-print("\nA3 MINUS A2 CONTINUATION (percentage points)")
-
-a=results31["A2_control"]
-b=results31["A3_neighbor_R1"]
-
-for k in (
-    "mAP_50_95","AP50","AP75",
-    "AP_small","AP_medium","AP_large","AR100"
-):
     print(
-        k,
-        round(100*(b["metrics"][k]-a["metrics"][k]),4)
+        f"{field:<18} "
+        f"A2={100*a:.4f}% "
+        f"B2={100*b:.4f}% "
+        f"Δ={100*(b-a):+.4f}pp"
     )
 
-for k in (
-    "person_AP_50_95",
-    "person_AP50",
-    "person_AP75"
-):
+for field in results31["A2_control"]["person_metrics"]:
+    a = results31["A2_control"]["person_metrics"][field]
+    b = results31[B2_ARM]["person_metrics"][field]
+
     print(
-        k,
-        round(
-            100*(b["person_metrics"][k]
-                 -a["person_metrics"][k]),4
-        )
+        f"{field:<18} "
+        f"A2={100*a:.4f}% "
+        f"B2={100*b:.4f}% "
+        f"Δ={100*(b-a):+.4f}pp"
     )
 
-output31=os.path.join(
-    PILOT_ROOT,"pilot_A2_vs_A3_COCOeval.json"
-)
+with open(
+    os.path.join(
+        PILOT_ROOT,
+        "pilot_A2_vs_B2_COCOeval.json"
+    ),
+    "w"
+) as f:
+    json.dump(
+        results31,
+        f,
+        indent=2,
+        allow_nan=False
+    )
 
-with open(output31,"w",encoding="utf-8") as f:
-    json.dump(results31,f,indent=2,allow_nan=False)
-
-print("STEP 31 PASS — SAVED:",output31)
+print("STEP 31 PASS — official A2 vs B2")
