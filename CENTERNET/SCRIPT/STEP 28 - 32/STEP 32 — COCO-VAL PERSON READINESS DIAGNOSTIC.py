@@ -1,630 +1,120 @@
-# ============================================================
-# STEP 32 — COCO-VAL PERSON READINESS DIAGNOSTIC
-# FAST-REPRO V1 — BF16
-#
-# Primary:
-# Score >= 0.50
-# IoU   >= 0.50
-#
-# Diagnostic sweep:
-# 0.05 / 0.10 / 0.20 / 0.30 / 0.40 / 0.50
-# ============================================================
 
+# STEP 32 — B2 QC setup
 import os
+import json
+import gc
+import numpy as np
 import torch
+from torch.utils.data import DataLoader, Subset
+
+QC_DIR = os.path.join(
+    PILOT_ROOT,
+    "quality_checks_B2"
+)
+os.makedirs(QC_DIR, exist_ok=True)
+
+assert set(paths) == {
+    "A2_control", B2_ARM
+}
+assert len(val_dataset) == 5000
 
 
-print("=" * 70)
-print("STEP 32 — PERSON READINESS DIAGNOSTIC")
-print("FAST-REPRO V1 — BF16")
-print("=" * 70)
+def qc_save(filename, obj):
+    p = os.path.join(QC_DIR, filename)
+
+    with open(p, "w", encoding="utf8") as f:
+        json.dump(
+            obj, f,
+            indent=2,
+            allow_nan=False
+        )
+
+    return p
 
 
-assert torch.cuda.is_available()
-
-assert torch.cuda.is_bf16_supported()
-
-
-# ============================================================
-# ENSURE BEST MODEL EXISTS
-# ============================================================
-
-if "best_model" not in globals():
-
-
-    assert os.path.exists(
-        BEST_CHECKPOINT
-    ), (
-        "BEST_CHECKPOINT tidak ditemukan. "
-        "Step 30 harus selesai."
+def qc_loader():
+    return DataLoader(
+        Subset(val_dataset, range(1000)),
+        batch_size=8,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=True,
+        collate_fn=centernet_collate_fn
     )
 
 
-    best_model = \
-        CenterNetResNet101(
-
-            num_classes=
-                CONFIG[
-                    "num_classes"
-                ],
-
-            pretrained_backbone=False
-
-        ).to(
-            device
-        )
-
-
-    checkpoint = torch.load(
-
-        BEST_CHECKPOINT,
-
-        map_location=device,
-
+def qc_model(arm):
+    ck = torch.load(
+        paths[arm],
+        map_location="cpu",
         weights_only=False
     )
 
+    m = CenterNetResNet101(
+        num_classes=80,
+        pretrained_backbone=False
+    ).to(device)
 
-    best_model.load_state_dict(
+    if arm == "A2_control":
+        load_a2_into_b2(
+            m, ck["model_state_dict"]
+        )
+    else:
+        m.load_state_dict(
+            ck["model_state_dict"],
+            strict=True
+        )
 
-        checkpoint[
-            "model_state_dict"
-        ]
+    m.eval()
+    return m
+
+
+def qc_wh_iou(pred, truth):
+    p = np.maximum(
+        np.asarray(pred, dtype=float), 0.0
+    )
+    g = np.maximum(
+        np.asarray(truth, dtype=float), 0.0
     )
 
-
-best_model.eval()
-
-
-# ============================================================
-# PARAMETER HEALTH CHECK
-# ============================================================
-
-for name, parameter \
-    in best_model.named_parameters():
-
-
-    if not torch.isfinite(
-        parameter
-    ).all():
-
-        raise FloatingPointError(
-
-            f"Best model contains "
-            f"non-finite parameter: "
-            f"{name}"
-        )
-
-
-# ============================================================
-# LOCKED PERSON CONFIG
-# ============================================================
-
-PERSON_CLASS = \
-    CONFIG[
-        "person_class_index"
-    ]
-
-
-IOU_THRESHOLD = \
-    CONFIG[
-        "iou_threshold"
-    ]
-
-
-SCORE_THRESHOLDS = [
-
-    0.05,
-    0.10,
-    0.20,
-    0.30,
-    0.40,
-    0.50
-]
-
-
-threshold_counts = {
-
-    threshold: {
-
-        "tp": 0,
-        "fp": 0,
-        "fn": 0
-    }
-
-    for threshold
-    in SCORE_THRESHOLDS
-}
-
-
-geometry_matches = 0
-
-
-geometry_gt = 0
-
-
-# ============================================================
-# FULL COCO-VAL PERSON DIAGNOSTIC
-# ============================================================
-
-with torch.no_grad():
-
-
-    for batch_index, (
-        images,
-        targets
-    ) in enumerate(
-        val_loader
-    ):
-
-
-        images = images.to(
-
-            device,
-
-            non_blocking=True
-        )
-
-
-        if not torch.isfinite(
-            images
-        ).all():
-
-            raise FloatingPointError(
-
-                f"Non-finite "
-                f"validation input "
-                f"at batch "
-                f"{batch_index + 1}."
-            )
-
-
-        # ----------------------------------------------------
-        # BF16 MODEL FORWARD
-        # ----------------------------------------------------
-
-        with torch.amp.autocast(
-
-            device_type="cuda",
-
-            dtype=
-                torch.bfloat16
-        ):
-
-
-            outputs = \
-                best_model(
-                    images
-                )
-
-
-        assert_outputs_finite(
-
-            outputs,
-
-            context=(
-
-                f"during person "
-                f"diagnostic batch "
-                f"{batch_index + 1}."
-            )
-        )
-
-
-        # ----------------------------------------------------
-        # FP32 DECODING
-        # ----------------------------------------------------
-
-        decode_outputs = {
-
-            name:
-                tensor.float()
-
-            for name, tensor
-            in outputs.items()
-        }
-
-
-        predictions = \
-            decode_centernet(
-
-                decode_outputs,
-
-                K=100,
-
-                score_threshold=0.0
-            )
-
-
-        # ----------------------------------------------------
-        # IMAGE-LEVEL METRICS
-        # ----------------------------------------------------
-
-        for prediction, target \
-            in zip(
-                predictions,
-                targets
-            ):
-
-
-            # ------------------------------------------------
-            # Geometry50:
-            # class-aware
-            # IoU >= 0.50
-            # confidence ignored
-            # ------------------------------------------------
-
-            geometry = \
-                greedy_detection_counts(
-
-                    prediction,
-                    target,
-
-                    score_threshold=0.0,
-
-                    iou_threshold=
-                        IOU_THRESHOLD,
-
-                    class_filter=
-                        PERSON_CLASS
-                )
-
-
-            geometry_matches += \
-                geometry[
-                    "tp"
-                ]
-
-
-            geometry_gt += \
-                geometry[
-                    "gt"
-                ]
-
-
-            # ------------------------------------------------
-            # CONFIDENCE SWEEP
-            # ------------------------------------------------
-
-            for threshold \
-                in SCORE_THRESHOLDS:
-
-
-                counts = \
-                    greedy_detection_counts(
-
-                        prediction,
-                        target,
-
-                        score_threshold=
-                            threshold,
-
-                        iou_threshold=
-                            IOU_THRESHOLD,
-
-                        class_filter=
-                            PERSON_CLASS
-                    )
-
-
-                threshold_counts[
-                    threshold
-                ][
-                    "tp"
-                ] += \
-                    counts[
-                        "tp"
-                    ]
-
-
-                threshold_counts[
-                    threshold
-                ][
-                    "fp"
-                ] += \
-                    counts[
-                        "fp"
-                    ]
-
-
-                threshold_counts[
-                    threshold
-                ][
-                    "fn"
-                ] += \
-                    counts[
-                        "fn"
-                    ]
-
-
-        if (
-            batch_index == 0
-            or (
-                batch_index + 1
-            ) % 250 == 0
-        ):
-
-
-            print(
-
-                "Processed val batches :",
-                batch_index + 1
-            )
-
-
-# ============================================================
-# GEOMETRY RESULT
-# ============================================================
-
-geometry50 = (
-
-    geometry_matches
-
-    / max(
-        geometry_gt,
-        1
-    )
-)
-
-
-print(
-    "\n"
-    + "=" * 70
-)
-
-
-print(
-    "PERSON READINESS — COCO-VAL"
-)
-
-
-print(
-    "=" * 70
-)
-
-
-print(
-    "Person class index :",
-    PERSON_CLASS
-)
-
-
-print(
-    "Person GT objects  :",
-    geometry_gt
-)
-
-
-print(
-
-    f"Geometry50         : "
-    f"{geometry50:.4f}"
-)
-
-
-# ============================================================
-# CONFIDENCE SWEEP RESULTS
-# ============================================================
-
-print(
-    "\n"
-    + "-" * 70
-)
-
-
-print(
-    "CONFIDENCE SWEEP — IoU >= 0.50"
-)
-
-
-print(
-    "-" * 70
-)
-
-
-print(
-
-    f"{'Score':<10}"
-    f"{'Precision':<15}"
-    f"{'Recall':<15}"
-    f"{'TP':<10}"
-    f"{'FP':<10}"
-    f"{'FN':<10}"
-)
-
-
-print(
-    "-" * 70
-)
-
-
-person_results = {}
-
-
-for threshold \
-    in SCORE_THRESHOLDS:
-
-
-    counts = \
-        threshold_counts[
-            threshold
-        ]
-
-
-    tp = counts[
-        "tp"
-    ]
-
-
-    fp = counts[
-        "fp"
-    ]
-
-
-    fn = counts[
-        "fn"
-    ]
-
-
-    precision = (
-
-        tp
-
-        / max(
-            tp + fp,
-            1
+    inter = np.minimum(p, g).prod()
+
+    return float(
+        inter / max(
+            1e-9,
+            p.prod() + g.prod() - inter
         )
     )
 
 
-    recall = (
+def qc_box_iou(pred, truth):
+    p = np.asarray(pred, dtype=float)
+    g = np.asarray(truth, dtype=float)
 
-        tp
+    inter = np.maximum(
+        0,
+        np.minimum(p[2:], g[2:])
+        - np.maximum(p[:2], g[:2])
+    ).prod()
 
-        / max(
-            tp + fn,
-            1
-        )
+    a = np.maximum(0, p[2:] - p[:2]).prod()
+    b = np.maximum(0, g[2:] - g[:2]).prod()
+
+    return float(
+        inter / max(1e-9, a + b - inter)
     )
 
 
-    person_results[
-        threshold
-    ] = {
+def qc_box(cx, cy, w, h):
+    w = max(0, float(w))
+    h = max(0, float(h))
 
-        "precision":
-            precision,
-
-        "recall":
-            recall,
-
-        "tp":
-            tp,
-
-        "fp":
-            fp,
-
-        "fn":
-            fn
-    }
-
-
-    print(
-
-        f"{threshold:<10.2f}"
-
-        f"{precision:<15.4f}"
-
-        f"{recall:<15.4f}"
-
-        f"{tp:<10d}"
-
-        f"{fp:<10d}"
-
-        f"{fn:<10d}"
-    )
-
-
-# ============================================================
-# PRIMARY LOCKED RESULT @ SCORE 0.50
-# ============================================================
-
-primary = \
-    person_results[
-        0.50
+    return [
+        cx - w / 2,
+        cy - h / 2,
+        cx + w / 2,
+        cy + h / 2
     ]
 
 
-print(
-    "\n"
-    + "=" * 70
-)
-
-
-print(
-    "PRIMARY PERSON DIAGNOSTIC"
-)
-
-
-print(
-    "=" * 70
-)
-
-
-print(
-    "Score threshold : 0.50"
-)
-
-
-print(
-    "IoU threshold   : 0.50"
-)
-
-
-print(
-    "Forward dtype   : BF16"
-)
-
-
-print(
-
-    f"Geometry50      : "
-    f"{geometry50:.4f}"
-)
-
-
-print(
-
-    f"Precision       : "
-    f"{primary['precision']:.4f}"
-)
-
-
-print(
-
-    f"Recall          : "
-    f"{primary['recall']:.4f}"
-)
-
-
-print(
-
-    "TP             :",
-    primary[
-        "tp"
-    ]
-)
-
-
-print(
-
-    "FP             :",
-    primary[
-        "fp"
-    ]
-)
-
-
-print(
-
-    "FN             :",
-    primary[
-        "fn"
-    ]
-)
-
-
-print(
-    "\nNO TRAINING OR WEIGHT UPDATE "
-    "WAS PERFORMED IN STEP 32."
-)
-
-
-print(
-    "\nSTEP 32 COMPLETE"
-)
-
-
-print(
-    "BASE / SOURCE PHASE COMPLETE"
-)
+print("STEP 32 PASS — B2 QC setup")
