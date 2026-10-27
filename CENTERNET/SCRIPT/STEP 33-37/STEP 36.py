@@ -1,95 +1,84 @@
 
-# ============================================================
-# STEP 36 — QC3: LOCALIZATION + TOP100 RECALL PROXIES
-# Non-exclusive peak proximity, NOT COCO recall.
-# ============================================================
+# STEP 36 — One-to-one class-correct top100 coverage
+import numpy as np
 
-summary36 = {}
+GROUPS = (
+    "all",
+    "small",
+    "medium",
+    "large",
+    "person"
+)
 
-for arm, rows in QC34_RECORDS.items():
-    summary36[arm] = {}
 
-    for group in (
-        'all', 'small', 'medium', 'large', 'person'
-    ):
-        rr = [
-            r for r in rows
-            if group == 'all'
-            or (
-                r['person'] if group == 'person'
-                else r['group'] == group
+def qc_group(rows, g):
+    return [
+        r for r in rows
+        if g == "all"
+        or (
+            r["person"] if g == "person"
+            else r["group"] == g
+        )
+    ]
+
+
+def mean_field(rows, key):
+    values = [
+        r[key]
+        for r in rows
+        if r.get(key) is not None
+    ]
+
+    return (
+        float(np.mean(values))
+        if values else None
+    )
+
+
+report36 = {}
+
+for arm, rows in QC_RECORDS.items():
+    report36[arm] = {}
+
+    for g in GROUPS:
+        rr = qc_group(rows, g)
+
+        report36[arm][g] = {
+            "GT": len(rr),
+
+            "top100_one_to_one_R1_ge005_pct": (
+                100 * mean_field(rr, "peak_r1")
+            ),
+
+            "top100_one_to_one_R2_ge005_pct": (
+                100 * mean_field(rr, "peak_r2")
+            ),
+
+            "top100_one_to_one_R4_ge005_pct": (
+                100 * mean_field(rr, "peak_r4")
             )
-        ]
-
-        if not rr:
-            continue
-
-        summary36[arm][group] = {
-            'gt': len(rr),
-
-            'center_score_mean': a3_mean(
-                rr, 'gt_center_score'
-            ),
-
-            'local_peak_within_r1_score_ge005_pct': (
-                100 * np.mean([
-                    r['local_peak_r1_ge005']
-                    for r in rr
-                ])
-            ),
-
-            'top100_class_correct_within_r1_ge005_pct': (
-                100 * np.mean([
-                    r['top100_r1_ge005']
-                    for r in rr
-                ])
-            ),
-
-            'top100_class_correct_within_r2_ge005_pct': (
-                100 * np.mean([
-                    r['top100_r2_ge005']
-                    for r in rr
-                ])
-            ),
-
-            'top100_class_correct_within_r4_ge005_pct': (
-                100 * np.mean([
-                    r['top100_r4_ge005']
-                    for r in rr
-                ])
-            ),
         }
 
-for group in (
-    'all', 'small', 'medium', 'large', 'person'
-):
-    a = summary36['A2_control'][group]
-    b = summary36['A3_neighbor_R1'][group]
+for g in GROUPS:
+    a = report36["A2_control"][g]
+    b = report36[B2_ARM][g]
 
-    assert a['gt'] == b['gt']
+    assert a["GT"] == b["GT"]
 
-    print('\n', group, 'N=', a['gt'])
+    print(
+        g,
+        "GT", a["GT"],
+        "R1 Δpp",
+        b["top100_one_to_one_R1_ge005_pct"]
+        - a["top100_one_to_one_R1_ge005_pct"],
+        "R2 Δpp",
+        b["top100_one_to_one_R2_ge005_pct"]
+        - a["top100_one_to_one_R2_ge005_pct"]
+    )
 
-    for field in (
-        'local_peak_within_r1_score_ge005_pct',
-        'top100_class_correct_within_r1_ge005_pct',
-        'top100_class_correct_within_r2_ge005_pct',
-        'top100_class_correct_within_r4_ge005_pct'
-    ):
-        print(
-            field,
-            'A2', round(a[field], 3),
-            'A3', round(b[field], 3),
-            'delta_pp',
-            round(b[field] - a[field], 3)
-        )
-
-a3_save_json(
-    'qc36_heatmap_top100_proximity.json',
-    summary36
+qc_save(
+    "qc36_heatmap_peak_coverage.json",
+    report36
 )
 
-print(
-    'STEP 36 PASS — proximity is a diagnostic, '
-    'not detection recall'
-)
+print("STEP 36 PASS — diagnostic, not official recall")
