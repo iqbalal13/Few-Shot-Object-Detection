@@ -1,38 +1,56 @@
 
-# STEP 37 — Official COCO AP summary from Step 31
+# ============================================================
+# STEP 37 — OFFICIAL COCO AP SUMMARY
+# FROM STEP 31 / FULL 5000 COCO-VAL
+# ============================================================
 
-assert set(results31) == {
-    "A2_control", B2_ARM
-}
+assert "A3_176K_reference" in results31
+assert "A3_v2_selected" in results31
 
 report37 = {
-    "control": "A2_control",
-    "experiment": B2_ARM,
+    "reference": "A3_176K_reference",
+    "candidate": "A3_v2_selected",
     "delta_percentage_points": {}
 }
 
-for domain in ("metrics", "person_metrics"):
-    for k in results31["A2_control"][domain]:
-        a = results31["A2_control"][domain][k]
-        b = results31[B2_ARM][domain][k]
+for domain in (
+    "metrics",
+    "person_metrics"
+):
+
+    old = results31[
+        "A3_176K_reference"
+    ][domain]
+
+    new = results31[
+        "A3_v2_selected"
+    ][domain]
+
+    for key in old:
+
+        a = old[key]
+        b = new[key]
 
         if a is None or b is None:
             continue
 
-        report37["delta_percentage_points"][k] = (
-            100 * (b - a)
-        )
+        delta = 100 * (float(b) - float(a))
+
+        report37[
+            "delta_percentage_points"
+        ][key] = delta
 
         print(
-            f"{k:<20}: "
-            f"A2={100*a:.4f}% "
-            f"B2={100*b:.4f}% "
-            f"Δ={100*(b-a):+.4f} pp"
+            f"{key:<20}: "
+            f"A3={100*a:.4f}%  "
+            f"A3-v2={100*b:.4f}%  "
+            f"DELTA={delta:+.4f} pp"
         )
+
 
 qc_save(
     "qc37_official_COCO_AP.json",
     report37
 )
 
-print("STEP 37 PASS — 5000-image official COCOeval")
+print("STEP 37 PASS")
