@@ -1,49 +1,51 @@
 
 # ============================================================
-# STEP 19 — BACKBONE OUTPUT SHAPE TEST
+# STEP 19 — A3-v2 RESNET-101 BACKBONE SANITY
+# FIX: A3 outputs C5 Tensor, not B2 C3/C4/C5 dict
 # ============================================================
 
 import torch
+import gc
 
-print("=" * 70)
-print("STEP 19 — BACKBONE SHAPE TEST")
-print("=" * 70)
+assert CONFIG["backbone"] == "resnet101"
+assert CONFIG["input_size"] == 640
+assert CONFIG["output_stride"] == 4
 
 backbone.eval()
 
-test_input = torch.randn(
-    1,
-    3,
-    CONFIG["input_size"],
-    CONFIG["input_size"],
-    device=device
-)
+with torch.inference_mode():
+    x = torch.randn(
+        1, 3,
+        CONFIG["input_size"],
+        CONFIG["input_size"],
+        device=device
+    )
 
-with torch.no_grad():
-    backbone_output = backbone(test_input)
+    features = backbone(x)
 
-print("Input shape  :", test_input.shape)
-print("Output shape :", backbone_output.shape)
+    assert isinstance(features, torch.Tensor), (
+        "A3 backbone must return Tensor, not dictionary"
+    )
 
-expected_shape = (
-    1,
-    2048,
-    CONFIG["input_size"] // 32,
-    CONFIG["input_size"] // 32
-)
+    expected = (
+        1, 2048,
+        CONFIG["input_size"] // 32,
+        CONFIG["input_size"] // 32
+    )
 
-print("Expected     :", expected_shape)
+    assert tuple(features.shape) == expected, (
+        f"Expected {expected}, got {tuple(features.shape)}"
+    )
 
-assert isinstance(backbone_output, torch.Tensor)
+    assert bool(torch.isfinite(features).all())
 
-assert tuple(backbone_output.shape) == expected_shape
+    print("Input :", tuple(x.shape))
+    print("C5    :", tuple(features.shape))
 
-assert torch.isfinite(backbone_output).all()
-
-del test_input
-del backbone_output
+del x, features
+gc.collect()
 
 if torch.cuda.is_available():
     torch.cuda.empty_cache()
 
-print("\nSTEP 19 PASSED")
+print("STEP 19 PASS — A3-v2 C5 Tensor")
