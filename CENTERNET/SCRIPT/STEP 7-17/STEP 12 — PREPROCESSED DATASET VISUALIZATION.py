@@ -1,90 +1,82 @@
+
 # ============================================================
-# STEP 12 — PREPROCESSED DATASET VISUALIZATION
+# STEP 12 — TRAIN AUGMENTATION VISUAL SANITY
 # ============================================================
+
+import random
+import numpy as np
+import torch
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
-print("=" * 70)
-print("STEP 12 — DATASET VISUALIZATION")
-print("=" * 70)
-
-rng = random.Random(SEED)
-
-sample_index = rng.randrange(
+index = random.Random(SEED).randrange(
     len(train_dataset)
 )
 
-image_tensor, target = train_dataset[
-    sample_index
-]
+img, target = train_dataset[index]
 
-image_np = denormalize_image(
-    image_tensor
+assert torch.isfinite(img).all()
+assert target["boxes"].shape[1] == 4
+
+assert (
+    len(target["boxes"])
+    == len(target["labels"])
 )
 
-fig, ax = plt.subplots(
-    figsize=(10, 10)
-)
-
-ax.imshow(image_np)
-
-boxes = target["boxes"].numpy()
-labels = target["labels"].numpy()
-
-for box, label in zip(
-    boxes,
-    labels
-):
-
-    x1, y1, x2, y2 = box
-
-    width = x2 - x1
-    height = y2 - y1
-
-    rect = patches.Rectangle(
-        (x1, y1),
-        width,
-        height,
-        linewidth=2,
-        edgecolor="red",
-        facecolor="none"
+if len(target["boxes"]):
+    assert torch.all(
+        target["boxes"] >= 0
     )
 
-    ax.add_patch(rect)
+    assert torch.all(
+        target["boxes"] <= CONFIG["input_size"] - 1
+    )
 
-    class_name = CONTIGUOUS_TO_NAME[
-        int(label)
-    ]
+    assert torch.all(
+        target["boxes"][:, 2] > target["boxes"][:, 0]
+    )
 
-    ax.text(
-        x1,
-        max(0, y1 - 3),
-        class_name,
-        fontsize=9,
-        bbox=dict(
-            facecolor="white",
-            alpha=0.7
+    assert torch.all(
+        target["boxes"][:, 3] > target["boxes"][:, 1]
+    )
+
+fig, ax = plt.subplots(
+    figsize=(8, 8)
+)
+
+ax.imshow(
+    denormalize_image(img)
+)
+
+for b, lbl in zip(
+    target["boxes"],
+    target["labels"]
+):
+    x1, y1, x2, y2 = b.tolist()
+
+    ax.add_patch(
+        patches.Rectangle(
+            (x1, y1),
+            x2 - x1,
+            y2 - y1,
+            fill=False,
+            edgecolor="red",
+            linewidth=1.5
         )
     )
 
 ax.set_title(
-    f"Preprocessed COCO Sample — "
-    f"{len(boxes)} objects"
+    "A3-v2 train augmentation — "
+    "jointly transformed GT"
 )
 
 ax.axis("off")
 plt.show()
 
-print("Tensor shape :", image_tensor.shape)
-print("Boxes        :", target["boxes"].shape)
-print("Labels       :", target["labels"].shape)
-print("Image ID     :", target["image_id"].item())
-
-assert image_tensor.shape == (
-    3,
-    CONFIG["input_size"],
-    CONFIG["input_size"]
+print(
+    "STEP 12 PASS, image",
+    int(target["image_id"]),
+    "GT",
+    len(target["boxes"])
 )
-
-print("\nSTEP 12 PASSED")
