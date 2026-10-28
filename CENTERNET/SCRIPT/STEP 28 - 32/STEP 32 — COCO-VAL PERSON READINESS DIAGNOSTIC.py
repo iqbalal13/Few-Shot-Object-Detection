@@ -6,7 +6,13 @@
 import os
 import json
 
-assert "results31" in globals()
+print("=" * 70)
+print("STEP 32 — A3-v2 FINAL MODEL SUMMARY")
+print("=" * 70)
+
+assert "results31" in globals(), (
+    "Run STEP 31 before STEP 32."
+)
 
 base = results31[
     "A3_176K_reference"
@@ -18,8 +24,12 @@ final = results31.get(
 )
 
 source_is_selected = (
-    "A3_v2_selected"
-    not in results31
+    "A3_v2_selected" not in results31
+)
+
+gain_map = 100 * (
+    final["metrics"]["mAP_50_95"]
+    - base["metrics"]["mAP_50_95"]
 )
 
 report = {
@@ -29,8 +39,8 @@ report = {
     ),
 
     "change": (
-        "train augmentation + 50/50 "
-        "uniform/class-balanced sampling "
+        "Train augmentation + "
+        "50/50 uniform/class-balanced sampling "
         "+ longer COCO continuation"
     ),
 
@@ -43,34 +53,34 @@ report = {
     "selected_is_reference": source_is_selected,
 
     "reference_metrics": base["metrics"],
+
     "selected_metrics": final["metrics"],
 
     "reference_person": base["person_metrics"],
+
     "selected_person": final["person_metrics"],
 
-    "gain_mAP_percentage_points": (
-        100 * (
-            final["metrics"]["mAP_50_95"]
-            - base["metrics"]["mAP_50_95"]
-        )
-    ),
+    "gain_mAP_percentage_points": gain_map,
 
     "train_history": V2_HISTORY,
 
     "limit": (
         "Results are COCO source-stage, "
-        "not few-shot CCTV metrics; "
-        "not a guarantee of large improvement."
+        "not few-shot CCTV metrics."
     )
 }
 
+output_path = os.path.join(
+    V2_ROOT,
+    "A3_v2_model_card.json"
+)
+
 with open(
-    os.path.join(
-        V2_ROOT,
-        "A3_v2_model_card.json"
-    ),
-    "w"
+    output_path,
+    "w",
+    encoding="utf-8"
 ) as f:
+
     json.dump(
         report,
         f,
@@ -78,23 +88,28 @@ with open(
         allow_nan=False
     )
 
-print("=" * 70)
-
 print(
     "Chosen checkpoint:",
     SELECTED_A3_V2
 )
 
 print(
-    "COCO mAP50:95:",
+    "Reference A3 mAP50:95:",
+    100 * base["metrics"]["mAP_50_95"],
+    "%"
+)
+
+print(
+    "Selected mAP50:95:",
     100 * final["metrics"]["mAP_50_95"],
     "%"
 )
 
 print(
     "Gain over original A3:",
-    report["gain_mAP_percentage_points"],
+    gain_map,
     "percentage points"
 )
 
+print("Saved model card:", output_path)
 print("STEP 32 COMPLETE")
