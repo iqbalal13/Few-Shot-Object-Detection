@@ -1,120 +1,100 @@
 
-# STEP 32 — B2 QC setup
+# ============================================================
+# STEP 32 — A3-v2 FINAL MODEL CARD
+# ============================================================
+
 import os
 import json
-import gc
-import numpy as np
-import torch
-from torch.utils.data import DataLoader, Subset
 
-QC_DIR = os.path.join(
-    PILOT_ROOT,
-    "quality_checks_B2"
+assert "results31" in globals()
+
+base = results31[
+    "A3_176K_reference"
+]
+
+final = results31.get(
+    "A3_v2_selected",
+    base
 )
-os.makedirs(QC_DIR, exist_ok=True)
 
-assert set(paths) == {
-    "A2_control", B2_ARM
+source_is_selected = (
+    "A3_v2_selected"
+    not in results31
+)
+
+report = {
+    "method": (
+        "ResNet101 CenterNet "
+        "A2-hybrid + A3-neighborhood R1"
+    ),
+
+    "change": (
+        "train augmentation + 50/50 "
+        "uniform/class-balanced sampling "
+        "+ longer COCO continuation"
+    ),
+
+    "source_model": "A3 176K",
+
+    "reference_checkpoint": A3_CKPT,
+
+    "selected_checkpoint": SELECTED_A3_V2,
+
+    "selected_is_reference": source_is_selected,
+
+    "reference_metrics": base["metrics"],
+    "selected_metrics": final["metrics"],
+
+    "reference_person": base["person_metrics"],
+    "selected_person": final["person_metrics"],
+
+    "gain_mAP_percentage_points": (
+        100 * (
+            final["metrics"]["mAP_50_95"]
+            - base["metrics"]["mAP_50_95"]
+        )
+    ),
+
+    "train_history": V2_HISTORY,
+
+    "limit": (
+        "Results are COCO source-stage, "
+        "not few-shot CCTV metrics; "
+        "not a guarantee of large improvement."
+    )
 }
-assert len(val_dataset) == 5000
 
-
-def qc_save(filename, obj):
-    p = os.path.join(QC_DIR, filename)
-
-    with open(p, "w", encoding="utf8") as f:
-        json.dump(
-            obj, f,
-            indent=2,
-            allow_nan=False
-        )
-
-    return p
-
-
-def qc_loader():
-    return DataLoader(
-        Subset(val_dataset, range(1000)),
-        batch_size=8,
-        shuffle=False,
-        num_workers=2,
-        pin_memory=True,
-        collate_fn=centernet_collate_fn
+with open(
+    os.path.join(
+        V2_ROOT,
+        "A3_v2_model_card.json"
+    ),
+    "w"
+) as f:
+    json.dump(
+        report,
+        f,
+        indent=2,
+        allow_nan=False
     )
 
+print("=" * 70)
 
-def qc_model(arm):
-    ck = torch.load(
-        paths[arm],
-        map_location="cpu",
-        weights_only=False
-    )
+print(
+    "Chosen checkpoint:",
+    SELECTED_A3_V2
+)
 
-    m = CenterNetResNet101(
-        num_classes=80,
-        pretrained_backbone=False
-    ).to(device)
+print(
+    "COCO mAP50:95:",
+    100 * final["metrics"]["mAP_50_95"],
+    "%"
+)
 
-    if arm == "A2_control":
-        load_a2_into_b2(
-            m, ck["model_state_dict"]
-        )
-    else:
-        m.load_state_dict(
-            ck["model_state_dict"],
-            strict=True
-        )
+print(
+    "Gain over original A3:",
+    report["gain_mAP_percentage_points"],
+    "percentage points"
+)
 
-    m.eval()
-    return m
-
-
-def qc_wh_iou(pred, truth):
-    p = np.maximum(
-        np.asarray(pred, dtype=float), 0.0
-    )
-    g = np.maximum(
-        np.asarray(truth, dtype=float), 0.0
-    )
-
-    inter = np.minimum(p, g).prod()
-
-    return float(
-        inter / max(
-            1e-9,
-            p.prod() + g.prod() - inter
-        )
-    )
-
-
-def qc_box_iou(pred, truth):
-    p = np.asarray(pred, dtype=float)
-    g = np.asarray(truth, dtype=float)
-
-    inter = np.maximum(
-        0,
-        np.minimum(p[2:], g[2:])
-        - np.maximum(p[:2], g[:2])
-    ).prod()
-
-    a = np.maximum(0, p[2:] - p[:2]).prod()
-    b = np.maximum(0, g[2:] - g[:2]).prod()
-
-    return float(
-        inter / max(1e-9, a + b - inter)
-    )
-
-
-def qc_box(cx, cy, w, h):
-    w = max(0, float(w))
-    h = max(0, float(h))
-
-    return [
-        cx - w / 2,
-        cy - h / 2,
-        cx + w / 2,
-        cy + h / 2
-    ]
-
-
-print("STEP 32 PASS — B2 QC setup")
+print("STEP 32 COMPLETE")
