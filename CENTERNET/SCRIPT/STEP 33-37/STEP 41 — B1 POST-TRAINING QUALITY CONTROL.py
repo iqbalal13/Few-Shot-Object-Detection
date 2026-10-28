@@ -1,93 +1,41 @@
 
-# STEP 41 — B2 pilot decision summary
-# No training, no new inference.
+# ============================================================
+# STEP 41 — A3-v2 FINAL QC SUMMARY
+# Validasi hasil Step 33–40, tanpa training
+# ============================================================
 
-for name in (
+required = [
+    "report33",
     "report35",
     "report36",
     "report37",
     "report38",
     "report39",
-    "report40"
-):
-    assert name in globals(), name
+    "report40",
+    "results31",
+    "QC_COUNTS",
+    "QC_REFERENCE",
+    "QC_CANDIDATE",
+    "SELECTED_A3_V2",
+    "qc_save"
+]
 
-AP = report37["delta_percentage_points"]
+missing = [
+    key for key in required
+    if key not in globals()
+]
 
-summary41 = {
-    "experiment": (
-        "B2 C3/C4 zero-initialized "
-        "gated residual fusion"
-    ),
-
-    "control": (
-        "A2 original 160K + "
-        "16K continuation"
-    ),
-
-    "B2": (
-        "A2 original 160K + "
-        "16K B2 continuation"
-    ),
-
-    "official_COCO_AP_delta_pp": AP,
-    "gates": report35,
-
-    "one_to_one_peak_R1_delta_pp": (
-        report36[B2_ARM]["all"][
-            "top100_one_to_one_R1_ge005_pct"
-        ]
-        - report36["A2_control"]["all"][
-            "top100_one_to_one_R1_ge005_pct"
-        ]
-    ),
-
-    "matched_peak_common_GT": (
-        report38["all"]["common_GT"]
-    ),
-
-    "matched_peak_WH_IoU_delta": (
-        report38["all"]["delta_peak_WH_size_IoU"]
-    ),
-
-    "matched_peak_box_IoU_delta": (
-        report38["all"]["delta_peak_box_IoU"]
-    ),
-
-    "GT_in_1000_image_QC": (
-        report39["A2_control"]["all"]["GT"]
-    ),
-
-    "interpretation": (
-        "One-seed pilot; do not infer "
-        "statistical significance or "
-        "CCTV FSOD success"
-    )
-}
-
-qc_save(
-    "qc41_final_B2_pilot_summary.json",
-    summary41
+assert not missing, (
+    f"Missing A3-v2 QC variables: {missing}"
 )
 
-print(
-    "B2 mAP delta pp:",
-    round(AP["mAP_50_95"], 4)
-)
+assert QC_REFERENCE == "A3_reference"
+assert QC_CANDIDATE == "A3_v2"
 
-print(
-    "B2 AP75 delta pp:",
-    round(AP["AP75"], 4)
-)
+assert "A3_176K_reference" in results31
+assert "A3_v2_selected" in results31
 
-print(
-    "B2 person AP delta pp:",
-    round(AP["person_AP_50_95"], 4)
-)
+assert QC_COUNTS[QC_REFERENCE]["GT"] == 7117
+assert QC_COUNTS[QC_CANDIDATE]["GT"] == 7117
 
-print(
-    "B2 matched peak WH delta:",
-    summary41["matched_peak_WH_IoU_delta"]
-)
-
-print("STEP 41 PASS — no new training")
+print("A3-v2 Step 41 dependencies: PASS")
