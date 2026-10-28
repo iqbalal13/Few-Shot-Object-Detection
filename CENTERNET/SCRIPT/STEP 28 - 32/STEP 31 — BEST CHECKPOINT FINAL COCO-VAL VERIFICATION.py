@@ -1,52 +1,46 @@
 
 # ============================================================
-# STEP 31 — OFFICIAL COCOeval
-# A3 176K vs SELECTED A3-v2
-# NO TRAINING
+# STEP 31 — OFFICIAL COCOeval A3 vs A3-v2
+# FULL 5000 COCO-VAL / NO TRAINING
 # ============================================================
 
 import os
-import math
-import json
 import io
-import contextlib
+import json
+import math
 import gc
+import contextlib
 
 import numpy as np
 import torch
 
 from pycocotools.cocoeval import COCOeval
 
-print("=" * 70)
-print("STEP 31 — OFFICIAL COCOeval")
-print("=" * 70)
+assert "SELECTED_A3_V2" in globals(), (
+    "Run STEP 30 first."
+)
+
+assert SELECTED_A3_V2 in (
+    A3_CKPT,
+    V2_BEST
+)
 
 assert len(val_dataset) == 5000
 assert not val_dataset.augment
+assert os.path.isfile(SELECTED_A3_V2)
 
-assert "SELECTED_A3_V2" in globals(), (
-    "Run STEP 30 before STEP 31."
+# Raw targets cukup untuk official COCOeval.
+# Tidak perlu membuat heatmap GT pada DataLoader validasi.
+
+val31, _ = build_val_loader(
+    int(SEED) + 3301,
+    encoded=False
 )
 
-assert SELECTED_A3_V2 in (A3_CKPT, V2_BEST)
-
-assert os.path.isfile(
-    SELECTED_A3_V2
-), SELECTED_A3_V2
-
-source_val_loader, _ = build_val_loader(
-    SEED + 3301,
-    encoded=True
-)
-
-assert len(source_val_loader) == 625
+assert len(val31) == 625
 
 
-# ============================================================
-# 1. OFFICIAL EVALUATION FUNCTION
-# ============================================================
-
-def eval31(path, label):
+def evaluate_checkpoint_a3v2(path, label):
 
     ck = torch.load(
         path,
@@ -59,84 +53,84 @@ def eval31(path, label):
         "A3_v2"
     )
 
-    assert int(
-        ck["additional_exposures"]
-    ) >= 16000
-
     assert (
         ck["gaussian_radius_mode"]
         == "v1_2_original"
     )
 
-    model_eval = CenterNetResNet101(
+    assert float(ck["neighbor_lambda"]) == 0.25
+
+    net31 = CenterNetResNet101(
         num_classes=80,
         pretrained_backbone=False
     ).to(device)
 
-    model_eval.load_state_dict(
+    net31.load_state_dict(
         ck["model_state_dict"],
         strict=True
     )
 
-    model_eval.eval()
+    net31.eval()
 
     detections = []
     seen = set()
 
+    # --------------------------------------------------------
+    # 1. INFERENCE
+    # --------------------------------------------------------
+
     with torch.inference_mode():
 
-        for batch in source_val_loader:
-
-            images, targets = (
-                batch[0],
-                batch[1]
-            )
+        for images, raw_targets in val31:
 
             with torch.amp.autocast(
-                "cuda",
+                device_type="cuda",
                 dtype=torch.bfloat16
             ):
-                raw = model_eval(
+
+                logits = net31(
                     images.to(
                         device,
                         non_blocking=True
                     )
                 )
 
-            predictions = decode_centernet(
+            preds = decode_centernet(
                 {
                     k: v.float()
-                    for k, v in raw.items()
+                    for k, v in logits.items()
                 },
                 K=100,
                 score_threshold=0.0
             )
 
-            for pred, t in zip(
-                predictions,
-                targets
+            for pred, target in zip(
+                preds,
+                raw_targets
             ):
 
                 image_id = int(
-                    t["image_id"]
+                    target["image_id"]
                 )
 
                 assert image_id not in seen
                 seen.add(image_id)
 
-                scale = float(
-                    t["scale"]
-                )
-
-                px, py = map(
-                    float,
-                    t["pad"].tolist()
-                )
-
                 H, W = map(
                     int,
-                    t["original_size"].tolist()
+                    target["original_size"].tolist()
                 )
+
+                s = float(
+                    target["scale"]
+                )
+
+                pad_x, pad_y = map(
+                    float,
+                    target["pad"].tolist()
+                )
+
+                assert s > 0
 
                 boxes = (
                     pred["boxes"]
@@ -146,19 +140,20 @@ def eval31(path, label):
                     .clone()
                 )
 
-                # Reverse letterbox coordinates.
+                # Reverse letterbox transform.
                 boxes[:, [0, 2]] = (
-                    (boxes[:, [0, 2]] - px) / scale
+                    (boxes[:, [0, 2]] - pad_x) / s
                 ).clamp(0, W)
 
                 boxes[:, [1, 3]] = (
-                    (boxes[:, [1, 3]] - py) / scale
+                    (boxes[:, [1, 3]] - pad_y) / s
                 ).clamp(0, H)
 
                 scores = (
                     pred["scores"]
                     .detach()
                     .cpu()
+                    .float()
                     .tolist()
                 )
 
@@ -166,10 +161,11 @@ def eval31(path, label):
                     pred["labels"]
                     .detach()
                     .cpu()
+                    .long()
                     .tolist()
                 )
 
-                for bb, sc, cls in zip(
+                for bb, score, cls in zip(
                     boxes.tolist(),
                     scores,
                     labels
@@ -182,41 +178,37 @@ def eval31(path, label):
                     if (
                         x2 <= x1
                         or y2 <= y1
-                        or not math.isfinite(sc)
+                        or not math.isfinite(float(score))
                     ):
                         continue
 
+                    assert 0 <= int(cls) < 80
+
                     detections.append({
                         "image_id": image_id,
-
                         "category_id": int(
-                            val_dataset.cat_ids[
-                                int(cls)
-                            ]
+                            val_dataset.cat_ids[int(cls)]
                         ),
-
                         "bbox": [
                             x1,
                             y1,
                             x2 - x1,
                             y2 - y1
                         ],
-
-                        "score": float(sc)
+                        "score": float(score)
                     })
 
-    # All 5000 validation images must be included.
     assert seen == set(
         map(int, val_dataset.image_ids)
+    ), "Missing COCO-Val images"
+
+    assert detections, (
+        "Decoder produced zero valid detections."
     )
 
-    assert len(detections) > 0, (
-        "No detections produced."
-    )
-
-    # ========================================================
+    # --------------------------------------------------------
     # 2. OFFICIAL COCOeval
-    # ========================================================
+    # --------------------------------------------------------
 
     with contextlib.redirect_stdout(
         io.StringIO()
@@ -240,9 +232,7 @@ def eval31(path, label):
             map(int, val_dataset.cat_ids)
         )
 
-        ce.params.maxDets = [
-            1, 10, 100
-        ]
+        ce.params.maxDets = [1, 10, 100]
 
         ce.params.iouThrs = np.linspace(
             0.5, 0.95, 10
@@ -252,7 +242,7 @@ def eval31(path, label):
         ce.accumulate()
         ce.summarize()
 
-    names = (
+    keys = (
         "mAP_50_95",
         "AP50",
         "AP75",
@@ -267,75 +257,71 @@ def eval31(path, label):
         "AR_large"
     )
 
-    metrics = dict(
-        zip(
-            names,
-            map(float, ce.stats)
-        )
+    metrics = {
+        key: float(x)
+        for key, x in zip(keys, ce.stats)
+    }
+
+    # --------------------------------------------------------
+    # 3. PERSON CLASS AP
+    # --------------------------------------------------------
+
+    person_k = ce.params.catIds.index(1)
+
+    all_area = (
+        ce.params.areaRngLbl.index("all")
     )
 
-    # ========================================================
-    # 3. PERSON-ONLY METRICS
-    # ========================================================
-
-    precision = ce.eval["precision"]
-
-    person_idx = ce.params.catIds.index(
-        1
-    )
-
-    area_idx = ce.params.areaRngLbl.index(
-        "all"
-    )
-
-    # maxDets=100 corresponds to index 2.
-    pi = precision[
+    person_precision = ce.eval["precision"][
         :,
         :,
-        person_idx,
-        area_idx,
+        person_k,
+        all_area,
         2
     ]
 
-    def positive_mean(values):
-
-        good = values[
-            values >= 0
-        ]
+    def valid_mean(x):
+        good = x[x >= 0]
 
         return (
             float(good.mean())
-            if len(good)
+            if good.size
             else None
         )
 
-    person = {
-        "person_AP_50_95": positive_mean(pi),
-        "person_AP50": positive_mean(pi[0]),
-        "person_AP75": positive_mean(pi[5])
+    person_metrics = {
+        "person_AP_50_95": valid_mean(
+            person_precision
+        ),
+        "person_AP50": valid_mean(
+            person_precision[0]
+        ),
+        "person_AP75": valid_mean(
+            person_precision[5]
+        )
     }
 
-    result = {
+    out = {
         "label": label,
         "checkpoint": path,
         "images": len(seen),
         "detections": len(detections),
         "metrics": metrics,
-        "person_metrics": person
+        "person_metrics": person_metrics
     }
 
-    del model_eval, ce, ck
+    del net31, ck, ce, dt
 
     gc.collect()
 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    return result
+    return out
 
 
 # ============================================================
-# 4. CHECKPOINT SELECTION
+# 4. SELECT CHECKPOINTS
 # ============================================================
 
 paths31 = {
@@ -352,94 +338,98 @@ if (
 
 
 # ============================================================
-# 5. EVALUATE BOTH MODELS
+# 5. RUN OFFICIAL EVALUATION
 # ============================================================
 
 results31 = {}
 
 for label, path in paths31.items():
 
-    assert os.path.isfile(path), path
-
-    print("\nOfficial COCOeval:", label)
+    print("\nCOCOeval:", label)
     print("Checkpoint:", path)
 
-    results31[label] = eval31(
-        path,
-        label
+    results31[label] = (
+        evaluate_checkpoint_a3v2(
+            path,
+            label
+        )
+    )
+
+    current_map = (
+        results31[label]
+        ["metrics"]["mAP_50_95"]
     )
 
     print(
-        "mAP50:95:",
-        100 * results31[label]["metrics"]["mAP_50_95"],
+        "mAP50:95 =",
+        round(100 * current_map, 4),
         "%"
     )
 
 
 # ============================================================
-# 6. COMPARE RESULTS
+# 6. COMPARE A3-v2 MINUS A3
 # ============================================================
 
 if "A3_v2_selected" in results31:
 
-    a = results31[
+    old = results31[
         "A3_176K_reference"
     ]
 
-    b = results31[
+    new = results31[
         "A3_v2_selected"
     ]
 
     print(
-        "\nA3-v2 minus A3 reference "
+        "\nDELTA A3-v2 minus A3 "
         "(percentage points)"
     )
 
-    for key in a["metrics"]:
+    for k in old["metrics"]:
 
         delta = 100 * (
-            b["metrics"][key]
-            - a["metrics"][key]
+            new["metrics"][k]
+            - old["metrics"][k]
         )
 
         print(
-            key,
-            round(delta, 4)
+            f"{k:16s} {delta:+.4f} pp"
         )
 
-    for key in a["person_metrics"]:
+    for k in old["person_metrics"]:
 
-        av = a["person_metrics"][key]
-        bv = b["person_metrics"][key]
+        x = old["person_metrics"][k]
+        y = new["person_metrics"][k]
 
-        if av is not None and bv is not None:
+        if x is not None and y is not None:
 
             print(
-                key,
-                round(
-                    100 * (bv - av),
-                    4
-                )
+                f"{k:16s} {100*(y-x):+.4f} pp"
             )
 
 else:
+
     print(
-        "No A3-v2 checkpoint beat baseline. "
-        "Retain A3 176K."
+        "No A3-v2 checkpoint beat A3 reference."
+    )
+
+    print(
+        "Original A3 176K retained."
     )
 
 
 # ============================================================
-# 7. SAVE OFFICIAL RESULTS
+# 7. SAVE JSON
 # ============================================================
 
-output_path = os.path.join(
+out_path31 = os.path.join(
     V2_ROOT,
     "A3_v2_official_COCOeval.json"
 )
 
 with open(
-    output_path,
+    out_path31,
     "w",
     encoding="utf-8"
 ) as f:
@@ -451,5 +441,5 @@ with open(
         allow_nan=False
     )
 
-print("\nSaved:", output_path)
-print("STEP 31 PASSED")
+print("Saved:", out_path31)
+print("STEP 31 PASS — official COCOeval complete")
