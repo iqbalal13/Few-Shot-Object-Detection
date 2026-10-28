@@ -1,5 +1,10 @@
 
-# STEP 34 — Paired GT diagnostic, one-to-one top100
+# ============================================================
+# STEP 34 — PAIRED GT DIAGNOSTICS
+# A3 REFERENCE VS A3-v2
+# 1000 COCO-VAL IMAGES
+# ============================================================
+
 import numpy as np
 import torch
 import gc
@@ -7,27 +12,25 @@ import gc
 QC_RECORDS = {}
 QC_COUNTS = {}
 
-DIRECTIONS = [
-    (dx, dy)
-    for dy in (-1, 0, 1)
-    for dx in (-1, 0, 1)
-    if dx or dy
-]
+for arm in QC_PATHS:
 
-for arm in paths:
     net = qc_model(arm)
+
     rows = []
     seen = set()
 
     with torch.inference_mode():
+
         for images, targets in qc_loader():
+
             with torch.amp.autocast(
                 "cuda",
                 dtype=torch.bfloat16
             ):
                 outputs = net(
                     images.to(
-                        device, non_blocking=True
+                        device,
+                        non_blocking=True
                     )
                 )
 
@@ -36,19 +39,34 @@ for arm in paths:
             )
 
             scores, _, classes, ys, xs = topk_centers(
-                p, K=100
+                p,
+                K=100
             )
 
-            whs = outputs["wh"].float().cpu().numpy()
-            offs = outputs["offset"].float().cpu().numpy()
+            whs = (
+                outputs["wh"]
+                .float()
+                .cpu()
+                .numpy()
+            )
+
+            offs = (
+                outputs["offset"]
+                .float()
+                .cpu()
+                .numpy()
+            )
 
             sc = scores.cpu().numpy()
             cl = classes.cpu().numpy()
+
             xx = xs.cpu().numpy().astype(int)
             yy = ys.cpu().numpy().astype(int)
 
             for b, t in enumerate(targets):
+
                 imgid = int(t["image_id"])
+
                 assert imgid not in seen
                 seen.add(imgid)
 
@@ -61,10 +79,15 @@ for arm in paths:
                     enc["mask"]
                 ).flatten().tolist()
 
-                candidates = []
                 centers = []
+                candidates = []
+
+                # --------------------------------------------
+                # BUILD VALID GT
+                # --------------------------------------------
 
                 for k in act:
+
                     gy, gx = divmod(
                         int(enc["indices"][k]),
                         OUTPUT_WIDTH
@@ -75,6 +98,7 @@ for arm in paths:
                         .numpy()
                         .astype(float)
                     )
+
                     gt_off = (
                         enc["offset"][k]
                         .numpy()
@@ -83,23 +107,30 @@ for arm in paths:
 
                     label = int(enc["labels"][k])
 
-                    true_box = qc_box(
+                    gt_box = qc_box(
                         gx + gt_off[0],
                         gy + gt_off[1],
                         *gt_wh
                     )
 
                     centers.append((
-                        k, gx, gy, label,
-                        gt_wh, gt_off, true_box
+                        k, gx, gy,
+                        label,
+                        gt_wh,
+                        gt_off,
+                        gt_box
                     ))
 
-                # Greedy, one-to-one class-correct matches
+                # --------------------------------------------
+                # ONE-TO-ONE HEATMAP PEAK MATCHING
+                # --------------------------------------------
+
                 for i, (
                     _, gx, gy, label, _, _, _
                 ) in enumerate(centers):
 
                     for j in range(len(sc[b])):
+
                         if (
                             int(cl[b, j]) != label
                             or float(sc[b, j]) < 0.05
@@ -123,20 +154,37 @@ for arm in paths:
                 used_p = set()
                 used_gt = set()
 
-                for d, negscore, i, j in sorted(candidates):
-                    if i not in used_gt and j not in used_p:
+                for d, negscore, i, j in sorted(
+                    candidates
+                ):
+
+                    if (
+                        i not in used_gt
+                        and j not in used_p
+                    ):
                         matches[i] = (d, j)
+
                         used_gt.add(i)
                         used_p.add(j)
 
                 scale = float(t["scale"])
 
+                # --------------------------------------------
+                # GT LEVEL METRICS
+                # --------------------------------------------
+
                 for i, (
-                    k, gx, gy, label,
-                    gt_wh, gt_off, gt_box
+                    k, gx, gy,
+                    label,
+                    gt_wh,
+                    gt_off,
+                    gt_box
                 ) in enumerate(centers):
 
-                    cw = whs[b, :, gy, gx]
+                    cw = np.maximum(
+                        whs[b, :, gy, gx], 0.
+                    )
+
                     co = offs[b, :, gy, gx]
 
                     row = {
@@ -183,8 +231,10 @@ for arm in paths:
                     )
 
                     row["group"] = (
-                        "small" if area < 1024
-                        else "medium" if area < 9216
+                        "small"
+                        if area < 1024
+                        else "medium"
+                        if area < 9216
                         else "large"
                     )
 
@@ -201,17 +251,26 @@ for arm in paths:
                     row["peak_r1"] = False
                     row["peak_r2"] = False
                     row["peak_r4"] = False
+
                     row["peak_wh_iou"] = None
                     row["peak_box_iou"] = None
                     row["peak_distance"] = None
 
+                    # ----------------------------------------
+                    # PREDICTED PEAK METRICS
+                    # ----------------------------------------
+
                     if i in matches:
+
                         d, j = matches[i]
 
                         px = int(xx[b, j])
                         py = int(yy[b, j])
 
-                        pw = whs[b, :, py, px]
+                        pw = np.maximum(
+                            whs[b, :, py, px], 0.
+                        )
+
                         po = offs[b, :, py, px]
 
                         row["peak_distance"] = int(d)
@@ -232,11 +291,17 @@ for arm in paths:
                             gt_box
                         )
 
+                    # ----------------------------------------
+                    # NEIGHBORHOOD WH ROBUSTNESS
+                    # ----------------------------------------
+
                     for radius in (1, 2, 4):
+
                         all_values = []
                         inside_values = []
 
-                        for dx, dy in DIRECTIONS:
+                        for dx, dy in QC_DIRECTIONS:
+
                             px = gx + radius * dx
                             py = gy + radius * dy
 
@@ -244,32 +309,43 @@ for arm in paths:
                                 0 <= px < OUTPUT_WIDTH
                                 and 0 <= py < OUTPUT_HEIGHT
                             ):
+
                                 v = qc_wh_iou(
-                                    whs[b, :, py, px],
+                                    np.maximum(
+                                        whs[b, :, py, px],
+                                        0.
+                                    ),
                                     gt_wh
                                 )
 
                                 all_values.append(v)
 
                                 if (
-                                    gt_box[0] <= px + 0.5 <= gt_box[2]
-                                    and gt_box[1] <= py + 0.5 <= gt_box[3]
+                                    gt_box[0]
+                                    <= px + 0.5
+                                    <= gt_box[2]
+                                    and
+                                    gt_box[1]
+                                    <= py + 0.5
+                                    <= gt_box[3]
                                 ):
                                     inside_values.append(v)
 
                         row[f"r{radius}_all"] = (
                             float(np.mean(all_values))
-                            if all_values else None
+                            if all_values
+                            else None
                         )
 
                         row[f"r{radius}_inside"] = (
                             float(np.mean(inside_values))
-                            if inside_values else None
+                            if inside_values
+                            else None
                         )
 
                     rows.append(row)
 
-    assert len(seen) == 1000
+    assert len(seen) == QC_N
     assert len(rows) > 0
 
     QC_RECORDS[arm] = rows
@@ -283,12 +359,15 @@ for arm in paths:
 
     del net
     gc.collect()
-    torch.cuda.empty_cache()
 
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+# Same GT population in both arms.
 assert (
-    [r["id"] for r in QC_RECORDS["A2_control"]]
+    [r["id"] for r in QC_RECORDS[QC_REFERENCE]]
     ==
-    [r["id"] for r in QC_RECORDS[B2_ARM]]
+    [r["id"] for r in QC_RECORDS[QC_CANDIDATE]]
 )
 
 qc_save(
@@ -301,4 +380,6 @@ qc_save(
     QC_COUNTS
 )
 
-print("STEP 34 PASS — GT aligned, one-to-one peak matching")
+print(
+    "STEP 34 PASS — A3/A3-v2 paired GT matching"
+)
