@@ -1,6 +1,6 @@
+
 # ============================================================
-# STEP 11 — COCO DATASET CLASS
-# V1.2: NO HORIZONTAL FLIP
+# STEP 11 — AUGMENTED TRAIN / UNCHANGED COCO-VAL
 # ============================================================
 
 import os
@@ -8,7 +8,7 @@ import random
 import numpy as np
 import torch
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageEnhance
 from pycocotools.coco import COCO
 from torch.utils.data import Dataset
 
@@ -25,14 +25,22 @@ class CenterNetCOCODataset(Dataset):
     ):
         self.image_root = image_root
         self.coco = COCO(annotation_file)
+
         self.input_size = int(input_size)
         self.augment = bool(augment)
-        self.flip_probability = float(flip_probability)
+        self.flip_probability = float(
+            flip_probability
+        )
 
         assert 0 <= self.flip_probability <= 1
 
-        self.image_ids = sorted(self.coco.getImgIds())
-        self.cat_ids = sorted(self.coco.getCatIds())
+        self.image_ids = sorted(
+            self.coco.getImgIds()
+        )
+
+        self.cat_ids = sorted(
+            self.coco.getCatIds()
+        )
 
         self.cat_id_to_contiguous = {
             cat_id: idx
@@ -43,38 +51,49 @@ class CenterNetCOCODataset(Dataset):
         return len(self.image_ids)
 
     def __getitem__(self, index):
-        image_id = int(self.image_ids[index])
-        info = self.coco.loadImgs([image_id])[0]
-
-        image_path = os.path.join(
-            self.image_root, info["file_name"]
+        image_id = int(
+            self.image_ids[int(index)]
         )
 
-        with Image.open(image_path) as img:
-            image = img.convert("RGB")
+        info = self.coco.loadImgs(
+            [image_id]
+        )[0]
+
+        image_path = os.path.join(
+            self.image_root,
+            info["file_name"]
+        )
+
+        with Image.open(image_path) as fh:
+            image = fh.convert("RGB")
 
         ann_ids = self.coco.getAnnIds(
             imgIds=[image_id],
             iscrowd=False
         )
-        annotations = self.coco.loadAnns(ann_ids)
+
+        anns = self.coco.loadAnns(ann_ids)
 
         boxes = []
         labels = []
 
-        for ann in annotations:
-            x, y, w, h = ann["bbox"]
+        for a in anns:
+            x, y, w, h = a["bbox"]
 
             if w <= 1 or h <= 1:
                 continue
 
-            cat_id = ann["category_id"]
-            if cat_id not in self.cat_id_to_contiguous:
+            cid = int(a["category_id"])
+
+            if cid not in self.cat_id_to_contiguous:
                 continue
 
-            boxes.append([x, y, x + w, y + h])
+            boxes.append([
+                x, y, x + w, y + h
+            ])
+
             labels.append(
-                self.cat_id_to_contiguous[cat_id]
+                self.cat_id_to_contiguous[cid]
             )
 
         boxes = np.asarray(
@@ -85,64 +104,116 @@ class CenterNetCOCODataset(Dataset):
             labels, dtype=np.int64
         )
 
-        if (
-            self.augment
-            and random.random() < self.flip_probability
-        ):
-            original_width = float(image.width)
-            image = ImageOps.mirror(image)
+        if self.augment:
 
-            if len(boxes) > 0:
-                old_x1 = boxes[:, 0].copy()
-                old_x2 = boxes[:, 2].copy()
+            # 1. Random horizontal flip.
+            if random.random() < self.flip_probability:
+                old_w = float(image.width)
 
-                boxes[:, 0] = original_width - old_x2
-                boxes[:, 2] = original_width - old_x1
+                image = ImageOps.mirror(image)
 
-        image_tensor, boxes, meta = (
-            preprocess_image_and_boxes(
-                image=image,
-                boxes=boxes,
+                if len(boxes):
+                    x1 = boxes[:, 0].copy()
+                    x2 = boxes[:, 2].copy()
+
+                    boxes[:, 0] = old_w - x2
+                    boxes[:, 2] = old_w - x1
+
+            # 2. Color jitter.
+            jitter = float(
+                CONFIG["train_color_jitter"]
+            )
+
+            for cls in (
+                ImageEnhance.Brightness,
+                ImageEnhance.Contrast,
+                ImageEnhance.Color
+            ):
+                image = cls(image).enhance(
+                    random.uniform(
+                        1 - jitter,
+                        1 + jitter
+                    )
+                )
+
+            # 3. Scale / translation.
+            (
+                image_tensor,
+                new_boxes,
+                meta,
+                keep
+            ) = preprocess_train_augmented(
+                image,
+                boxes,
                 input_size=self.input_size
             )
-        )
+
+            # 4. Apply same filtering to boxes/labels.
+            new_boxes = new_boxes[keep]
+            labels = labels[keep]
+
+        else:
+            (
+                image_tensor,
+                new_boxes,
+                meta
+            ) = preprocess_image_and_boxes(
+                image,
+                boxes,
+                input_size=self.input_size
+            )
 
         target = {
             "boxes": torch.as_tensor(
-                boxes, dtype=torch.float32
+                new_boxes,
+                dtype=torch.float32
             ),
+
             "labels": torch.as_tensor(
-                labels, dtype=torch.long
+                labels,
+                dtype=torch.long
             ),
+
             "image_id": torch.tensor(
-                image_id, dtype=torch.long
+                image_id,
+                dtype=torch.long
             ),
+
             "original_size": torch.tensor(
-                meta["original_size"], dtype=torch.long
+                meta["original_size"],
+                dtype=torch.long
             ),
+
             "scale": torch.tensor(
-                meta["scale"], dtype=torch.float32
+                meta["scale"],
+                dtype=torch.float32
             ),
+
             "pad": torch.tensor(
                 [meta["pad_x"], meta["pad_y"]],
                 dtype=torch.float32
             )
         }
 
+        assert (
+            len(target["boxes"])
+            == len(target["labels"])
+        )
+
         return image_tensor, target
 
 
 train_dataset = CenterNetCOCODataset(
-    image_root=CONFIG["train_images"],
-    annotation_file=CONFIG["train_annotations"],
+    CONFIG["train_images"],
+    CONFIG["train_annotations"],
     input_size=CONFIG["input_size"],
-    augment=False,
-    flip_probability=0.0
+    augment=True,
+    flip_probability=CONFIG["train_horizontal_flip_p"]
 )
 
 val_dataset = CenterNetCOCODataset(
-    image_root=CONFIG["val_images"],
-    annotation_file=CONFIG["val_annotations"],
+    CONFIG["val_images"],
+    CONFIG["val_annotations"],
     input_size=CONFIG["input_size"],
     augment=False,
     flip_probability=0.0
@@ -150,20 +221,21 @@ val_dataset = CenterNetCOCODataset(
 
 assert len(train_dataset) == 118287
 assert len(val_dataset) == 5000
-assert not train_dataset.augment
+
+assert train_dataset.augment
 assert not val_dataset.augment
-assert train_dataset.cat_ids == val_dataset.cat_ids
 
-sample_image, sample_target = val_dataset[0]
-
-assert sample_image.shape == (3, 640, 640)
-assert sample_target["boxes"].ndim == 2
-assert sample_target["boxes"].shape[1] == 4
-assert len(sample_target["boxes"]) == len(
-    sample_target["labels"]
+assert (
+    train_dataset.cat_ids
+    == val_dataset.cat_ids
 )
 
-print("STEP 11 PASSED")
-print("Train:", len(train_dataset))
-print("Val:", len(val_dataset))
-print("Training horizontal flip: DISABLED")
+im, t = val_dataset[0]
+
+assert im.shape == (3, 640, 640)
+assert t["boxes"].shape[1] == 4
+
+print(
+    "STEP 11 PASS — train augmented / "
+    "validation deterministic"
+)
