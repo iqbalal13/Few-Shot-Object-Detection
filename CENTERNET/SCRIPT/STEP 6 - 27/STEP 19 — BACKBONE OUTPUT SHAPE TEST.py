@@ -1,32 +1,49 @@
 
-# STEP 19 — Multi-scale backbone sanity
+# ============================================================
+# STEP 19 — BACKBONE OUTPUT SHAPE TEST
+# ============================================================
+
 import torch
+
+print("=" * 70)
+print("STEP 19 — BACKBONE SHAPE TEST")
+print("=" * 70)
 
 backbone.eval()
 
-with torch.inference_mode():
-    x = torch.randn(
-        1, 3, 640, 640,
-        device=device
-    )
-    features = backbone(x)
+test_input = torch.randn(
+    1,
+    3,
+    CONFIG["input_size"],
+    CONFIG["input_size"],
+    device=device
+)
 
-expected = {
-    "c3": (1, 512, 80, 80),
-    "c4": (1, 1024, 40, 40),
-    "c5": (1, 2048, 20, 20)
-}
+with torch.no_grad():
+    backbone_output = backbone(test_input)
 
-for key, shape in expected.items():
-    assert tuple(features[key].shape) == shape, (
-        key, features[key].shape
-    )
-    assert bool(torch.isfinite(features[key]).all())
-    print(key, features[key].shape)
+print("Input shape  :", test_input.shape)
+print("Output shape :", backbone_output.shape)
 
-del x, features
+expected_shape = (
+    1,
+    2048,
+    CONFIG["input_size"] // 32,
+    CONFIG["input_size"] // 32
+)
+
+print("Expected     :", expected_shape)
+
+assert isinstance(backbone_output, torch.Tensor)
+
+assert tuple(backbone_output.shape) == expected_shape
+
+assert torch.isfinite(backbone_output).all()
+
+del test_input
+del backbone_output
 
 if torch.cuda.is_available():
     torch.cuda.empty_cache()
 
-print("STEP 19 PASS")
+print("\nSTEP 19 PASSED")
