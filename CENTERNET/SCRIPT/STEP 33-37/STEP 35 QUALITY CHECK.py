@@ -1,82 +1,88 @@
 
-# STEP 35 — Confirm learned B2 gates
-import torch
+# ============================================================
+# STEP 35 — A3-v2 TRAINING HISTORY AUDIT
+# NO INFERENCE / NO TRAINING
+# ============================================================
 
-ck = torch.load(
-    paths[B2_ARM],
-    map_location="cpu",
-    weights_only=False
-)
+import os
+import json
 
-net = qc_model(B2_ARM)
-probe_images, _ = next(iter(qc_loader()))
+assert os.path.isfile(V2_HISTORY)
 
-net.eval()
+with open(
+    V2_HISTORY,
+    "r",
+    encoding="utf-8"
+) as f:
+    v2_hist35 = json.load(f)
 
-with torch.inference_mode():
-    f = net.backbone(
-        probe_images[:1].to(device)
-    )
+assert isinstance(v2_hist35, list)
+assert len(v2_hist35) > 0
 
-    base4 = net.neck.deconv1(f["c5"])
-
-    lateral4 = (
-        net.neck.gate_c4
-        * net.neck.lateral_c4(f["c4"])
-    )
-
-    intermediate = net.neck.deconv2(
-        base4 + lateral4
-    )
-
-    lateral3 = (
-        net.neck.gate_c3
-        * net.neck.lateral_c3(f["c3"])
-    )
-
-ratio4 = float(
-    lateral4.float().norm()
-    / base4.float().norm().clamp_min(1e-9)
-)
-
-ratio3 = float(
-    lateral3.float().norm()
-    / intermediate.float().norm().clamp_min(1e-9)
-)
-
-g3 = float(net.neck.gate_c3)
-g4 = float(net.neck.gate_c4)
+assert [
+    row["epoch"]
+    for row in v2_hist35
+] == list(range(1, len(v2_hist35) + 1))
 
 report35 = {
-    "gate_c3": g3,
-    "gate_c4": g4,
-    "relative_lateral_norm_C3": ratio3,
-    "relative_lateral_norm_C4": ratio4,
-    "c3_active": abs(g3) > 1e-9 and ratio3 > 1e-9,
-    "c4_active": abs(g4) > 1e-9 and ratio4 > 1e-9
+    "base_checkpoint": A3_CKPT,
+    "selected_checkpoint": SELECTED_A3_V2,
+
+    "completed_epochs": len(v2_hist35),
+
+    "additional_exposures_completed": int(
+        v2_hist35[-1]["additional_exposures"]
+    ),
+
+    "best_epoch": int(
+        report33[QC_CANDIDATE]["epoch_recorded"]
+    ),
+
+    "best_candidate_map_pct": (
+        100 * results31[
+            "A3_v2_selected"
+        ]["metrics"]["mAP_50_95"]
+    ),
+
+    "epochs": []
 }
 
+for row in v2_hist35:
+
+    entry = {
+        "epoch": int(row["epoch"]),
+
+        "additional_exposures": int(
+            row["additional_exposures"]
+        ),
+
+        "lr_backbone": float(
+            row["lr_backbone"]
+        ),
+
+        "lr_neck_head": float(
+            row["lr_neck_head"]
+        ),
+
+        "official_map_pct": (
+            100 * float(row["official_map"])
+            if row.get("official_map") is not None
+            else None
+        )
+    }
+
+    report35["epochs"].append(entry)
+
+    print(entry)
+
+assert (
+    report35["best_epoch"]
+    <= report35["completed_epochs"]
+)
+
 qc_save(
-    "qc35_gate_activation.json",
+    "qc35_training_history.json",
     report35
 )
 
-print(report35)
-
-if (
-    not report35["c3_active"]
-    or not report35["c4_active"]
-):
-    print(
-        "WARNING: one or both lateral branches "
-        "are effectively inactive"
-    )
-
-del (
-    ck, net, probe_images, f,
-    base4, lateral4, intermediate, lateral3
-)
-
-torch.cuda.empty_cache()
-
-print("STEP 35 PASS — activation audit performed")
+print("STEP 35 PASS — training history inspected")
