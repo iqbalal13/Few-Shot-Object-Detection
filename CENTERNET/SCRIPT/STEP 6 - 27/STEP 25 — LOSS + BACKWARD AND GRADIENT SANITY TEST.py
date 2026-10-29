@@ -1,101 +1,79 @@
 
 # ============================================================
-# STEP 25 — A3-v2 LOSS AND GRADIENT SANITY
-# NO OPTIMIZER STEP / NO TRAINING
+# STEP 25 — A3-v2 PEAK-GEOMETRY GRADIENT SANITY
 # ============================================================
 
 import torch
 
-# Aktifkan A3, bukan A2-only.
-criterion.neighbor_lambda = float(
-    CONFIG["a3_neighbor_lambda"]
-)
-
-assert abs(criterion.neighbor_lambda - 0.25) < 1e-12
-assert CONFIG["wh_loss_type"] == "hybrid_abs_relative"
-assert CONFIG["gaussian_radius_mode"] == "v1_2_original"
-
-# ------------------------------------------------------------
-# 1. REAL BATCH FORWARD + BACKWARD
-# ------------------------------------------------------------
+assert criterion.neighbor_lambda == 0.25
+assert criterion.offset_neighbor_lambda == 0.25
+assert CONFIG["a3_neighbor_radius"] == 1
 
 model.train()
 
 images, raw_targets = next(iter(train_loader))
 
-images = images[:1].to(
-    device, non_blocking=True
-)
+images = images[:1].to(device)
 
-targets = build_batch_centernet_targets(
+encoded = build_batch_centernet_targets(
     raw_targets[:1],
-    device=device
+    device
 )
 
 model.zero_grad(set_to_none=True)
 
 outputs = model(images)
-losses = criterion(outputs, targets)
+losses = criterion(outputs, encoded)
 
 assert bool(torch.isfinite(losses["loss_total"]))
 
 losses["loss_total"].backward()
 
-n_grad = 0
-n_nonzero = 0
+active, finite = 0, 0
 
 for name, p in model.named_parameters():
-    if p.grad is None:
-        continue
 
-    assert bool(torch.isfinite(p.grad).all()), (
-        f"Bad gradient: {name}"
-    )
+    if p.grad is not None:
+        active += 1
 
-    n_grad += 1
-    n_nonzero += int(
-        bool(p.grad.abs().sum() > 0)
-    )
+        assert bool(torch.isfinite(p.grad).all()), (
+            f"Bad gradient: {name}"
+        )
 
-assert n_grad > 0
-assert n_nonzero > 0
+        finite += int(
+            bool(p.grad.abs().sum() > 0)
+        )
 
-print("Train batch losses:")
-for key, value in losses.items():
-    print(key, round(float(value.detach()), 6))
+assert active > 0 and finite > 0
 
-print("Finite gradient tensors:", n_grad)
-print("Nonzero gradient tensors:", n_nonzero)
+print("Real batch:", {
+    k: round(float(v.detach()), 6)
+    for k, v in losses.items()
+})
 
 model.zero_grad(set_to_none=True)
 
-del images, raw_targets, targets, outputs, losses
+del images, raw_targets, encoded, outputs, losses
 
 # ------------------------------------------------------------
-# 2. GUARANTEED A3 NEIGHBOR GRADIENT TEST
+# SYNTHETIC 8-NEIGHBOR GRADIENT TEST
 # ------------------------------------------------------------
 
-# Synthetic GT berukuran 48x48 piksel.
-# Seluruh 8 grid tetangga radius 1 harus valid.
-
-probe_target = {
-    "boxes": torch.tensor(
-        [[160., 160., 208., 208.]],
-        dtype=torch.float32
-    ),
+probe_raw = [{
+    "boxes": torch.tensor([
+        [160., 160., 208., 208.]
+    ]),
     "labels": torch.tensor(
         [0], dtype=torch.long
     )
-}
+}]
 
-probe_gt = build_batch_centernet_targets(
-    [probe_target],
-    device=device
+probe = build_batch_centernet_targets(
+    probe_raw,
+    device
 )
 
-assert int(
-    probe_gt["neighbor_mask"].sum()
-) == 8
+assert int(probe["neighbor_mask"].sum()) == 8
 
 H = (
     CONFIG["input_size"]
@@ -108,49 +86,84 @@ probe_wh = torch.zeros(
     requires_grad=True
 )
 
-probe_pred = {
+probe_off = torch.zeros(
+    1, 2, H, H,
+    device=device,
+    requires_grad=True
+)
+
+probe_outputs = {
     "heatmap": torch.zeros(
-        1, CONFIG["num_classes"], H, H,
+        1, 80, H, H,
         device=device
     ),
     "wh": probe_wh,
-    "offset": torch.zeros(
-        1, 2, H, H,
-        device=device
-    )
+    "offset": probe_off
 }
 
-probe_loss = criterion(
-    probe_pred,
-    probe_gt
-)["loss_wh_neighbor"]
-
-assert float(probe_loss.detach()) > 0
-
-probe_loss.backward()
-
-neighbor_idx = (
-    probe_gt["neighbor_indices"][0, 0][
-        probe_gt["neighbor_mask"][0, 0]
-    ]
+probe_losses = criterion(
+    probe_outputs,
+    probe
 )
 
-neighbor_grad = (
-    probe_wh.grad[0]
-    .reshape(2, -1)[:, neighbor_idx]
+assert float(
+    probe_losses["loss_wh_neighbor"].detach()
+) > 0
+
+assert float(
+    probe_losses["loss_offset_neighbor"].detach()
+) > 0
+
+# Verify WH gradient on all 8 valid neighbor cells.
+probe_losses["loss_wh_neighbor"].backward(
+    retain_graph=True
 )
+
+ind = probe["neighbor_indices"][0, 0][
+    probe["neighbor_mask"][0, 0]
+]
+
+wgrad = probe_wh.grad[0].reshape(
+    2, -1
+)[:, ind]
 
 assert bool(
-    (neighbor_grad.abs().sum(dim=0) > 0).all()
-), "A3 neighbor gradients disconnected"
+    (wgrad.abs().sum(0) > 0).all()
+), "WH neighbor gradient disconnected"
 
-print("A3 neighbor lambda:", criterion.neighbor_lambda)
-print("8 neighbor gradient paths: PASS")
-print("STEP 25 PASS — A3 supervision active")
+# Verify OFFSET gradient on all 8 valid neighbor cells.
+probe_losses["loss_offset_neighbor"].backward()
+
+ograd = probe_off.grad[0].reshape(
+    2, -1
+)[:, ind]
+
+assert bool(
+    (ograd.abs().sum(0) > 0).all()
+), "Offset neighbor gradient disconnected"
+
+center_i = int(probe["indices"][0, 0])
+
+center_xy = (
+    center_i % H,
+    center_i // H
+)
+
+neighbor_xy = [
+    (int(v) % H, int(v) // H)
+    for v in ind
+]
+
+print("GT center feature cell:", center_xy)
+print("8 neighbor feature cells:", neighbor_xy)
+print("WH / offset neighbor gradient: PASS")
+print("STEP 25 PASS — no optimizer step performed")
+
+model.zero_grad(set_to_none=True)
 
 del (
-    probe_target, probe_gt, probe_wh,
-    probe_pred, probe_loss
+    probe, probe_wh, probe_off,
+    probe_outputs, probe_losses
 )
 
 if torch.cuda.is_available():
