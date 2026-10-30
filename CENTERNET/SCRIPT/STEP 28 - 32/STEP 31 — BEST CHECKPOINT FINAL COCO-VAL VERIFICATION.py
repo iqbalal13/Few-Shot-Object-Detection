@@ -1,7 +1,8 @@
 
 # ============================================================
-# STEP 31 — OFFICIAL COCOeval A3 vs A3-v2
-# FULL 5000 COCO-VAL / NO TRAINING
+# STEP 31 — THREE-ARM OFFICIAL COCOeval
+# K=300, maxDets=[1,10,100]
+# A3 176K / OLD A3-v2 / NEW PEAK-GEOMETRY
 # ============================================================
 
 import os
@@ -16,21 +17,17 @@ import torch
 
 from pycocotools.cocoeval import COCOeval
 
-assert "SELECTED_A3_V2" in globals(), (
-    "Run STEP 30 first."
-)
-
-assert SELECTED_A3_V2 in (
-    A3_CKPT,
-    V2_BEST
-)
+assert int(CONFIG["eval_topk"]) == 300
 
 assert len(val_dataset) == 5000
 assert not val_dataset.augment
-assert os.path.isfile(SELECTED_A3_V2)
 
-# Raw targets cukup untuk official COCOeval.
-# Tidak perlu membuat heatmap GT pada DataLoader validasi.
+for path in (
+    A3_CKPT,
+    OLD_V2_BEST,
+    NEW_V2_BEST
+):
+    assert os.path.isfile(path), path
 
 val31, _ = build_val_loader(
     int(SEED) + 3301,
@@ -40,7 +37,7 @@ val31, _ = build_val_loader(
 assert len(val31) == 625
 
 
-def evaluate_checkpoint_a3v2(path, label):
+def eval31_peakgeom(path, label):
 
     ck = torch.load(
         path,
@@ -60,6 +57,30 @@ def evaluate_checkpoint_a3v2(path, label):
 
     assert float(ck["neighbor_lambda"]) == 0.25
 
+    if label == "A3_v2_peakgeom_candidate":
+
+        assert (
+            ck["method_tag"]
+            == "peak_aligned_geometry"
+        )
+
+        assert (
+            float(ck["offset_neighbor_lambda"])
+            == 0.25
+        )
+
+        assert (
+            0 < int(ck["additional_exposures"])
+            <= 32000
+        )
+
+    if label == "A3_v2_old_208K":
+
+        assert (
+            int(ck["additional_exposures"])
+            == 32000
+        )
+
     net31 = CenterNetResNet101(
         num_classes=80,
         pretrained_backbone=False
@@ -76,7 +97,7 @@ def evaluate_checkpoint_a3v2(path, label):
     seen = set()
 
     # --------------------------------------------------------
-    # 1. INFERENCE
+    # INFERENCE — K300
     # --------------------------------------------------------
 
     with torch.inference_mode():
@@ -88,7 +109,7 @@ def evaluate_checkpoint_a3v2(path, label):
                 dtype=torch.bfloat16
             ):
 
-                logits = net31(
+                raw = net31(
                     images.to(
                         device,
                         non_blocking=True
@@ -98,87 +119,86 @@ def evaluate_checkpoint_a3v2(path, label):
             preds = decode_centernet(
                 {
                     k: v.float()
-                    for k, v in logits.items()
+                    for k, v in raw.items()
                 },
-                K=100,
+                K=CONFIG["eval_topk"],
                 score_threshold=0.0
             )
 
-            for pred, target in zip(
+            for pred, t in zip(
                 preds,
                 raw_targets
             ):
 
-                image_id = int(
-                    target["image_id"]
-                )
+                image_id = int(t["image_id"])
 
                 assert image_id not in seen
+
                 seen.add(image_id)
 
                 H, W = map(
                     int,
-                    target["original_size"].tolist()
+                    t["original_size"].tolist()
                 )
 
-                s = float(
-                    target["scale"]
-                )
+                scale = float(t["scale"])
 
-                pad_x, pad_y = map(
+                px, py = map(
                     float,
-                    target["pad"].tolist()
+                    t["pad"].tolist()
                 )
 
-                assert s > 0
+                assert scale > 0
 
                 boxes = (
                     pred["boxes"]
                     .detach()
-                    .cpu()
                     .float()
+                    .cpu()
                     .clone()
                 )
 
                 # Reverse letterbox transform.
                 boxes[:, [0, 2]] = (
-                    (boxes[:, [0, 2]] - pad_x) / s
+                    (boxes[:, [0, 2]] - px)
+                    / scale
                 ).clamp(0, W)
 
                 boxes[:, [1, 3]] = (
-                    (boxes[:, [1, 3]] - pad_y) / s
+                    (boxes[:, [1, 3]] - py)
+                    / scale
                 ).clamp(0, H)
 
                 scores = (
                     pred["scores"]
                     .detach()
-                    .cpu()
                     .float()
+                    .cpu()
                     .tolist()
                 )
 
-                labels = (
+                classes = (
                     pred["labels"]
                     .detach()
-                    .cpu()
                     .long()
+                    .cpu()
                     .tolist()
                 )
 
-                for bb, score, cls in zip(
+                for b, score, cls in zip(
                     boxes.tolist(),
                     scores,
-                    labels
+                    classes
                 ):
 
                     x1, y1, x2, y2 = map(
-                        float, bb
+                        float, b
                     )
 
                     if (
                         x2 <= x1
                         or y2 <= y1
-                        or not math.isfinite(float(score))
+                        or not math.isfinite(score)
                     ):
                         continue
 
@@ -186,28 +206,29 @@ def evaluate_checkpoint_a3v2(path, label):
 
                     detections.append({
                         "image_id": image_id,
+
                         "category_id": int(
                             val_dataset.cat_ids[int(cls)]
                         ),
+
                         "bbox": [
                             x1,
                             y1,
                             x2 - x1,
                             y2 - y1
                         ],
+
                         "score": float(score)
                     })
 
     assert seen == set(
         map(int, val_dataset.image_ids)
-    ), "Missing COCO-Val images"
-
-    assert detections, (
-        "Decoder produced zero valid detections."
     )
 
+    assert len(detections) > 0
+
     # --------------------------------------------------------
-    # 2. OFFICIAL COCOeval
+    # OFFICIAL COCOeval
     # --------------------------------------------------------
 
     with contextlib.redirect_stdout(
@@ -232,10 +253,14 @@ def evaluate_checkpoint_a3v2(path, label):
             map(int, val_dataset.cat_ids)
         )
 
-        ce.params.maxDets = [1, 10, 100]
+        ce.params.maxDets = [
+            1, 10, 100
+        ]
 
         ce.params.iouThrs = np.linspace(
-            0.5, 0.95, 10
+            0.50,
+            0.95,
+            10
         )
 
         ce.evaluate()
@@ -258,29 +283,20 @@ def evaluate_checkpoint_a3v2(path, label):
     )
 
     metrics = {
-        key: float(x)
-        for key, x in zip(keys, ce.stats)
+        k: float(v)
+        for k, v in zip(keys, ce.stats)
     }
 
-    # --------------------------------------------------------
-    # 3. PERSON CLASS AP
-    # --------------------------------------------------------
-
-    person_k = ce.params.catIds.index(1)
-
-    all_area = (
-        ce.params.areaRngLbl.index("all")
-    )
-
-    person_precision = ce.eval["precision"][
+    # Person category ID in COCO = 1.
+    pi = ce.eval["precision"][
         :,
         :,
-        person_k,
-        all_area,
+        ce.params.catIds.index(1),
+        ce.params.areaRngLbl.index("all"),
         2
     ]
 
-    def valid_mean(x):
+    def validmean(x):
         good = x[x >= 0]
 
         return (
@@ -289,151 +305,137 @@ def evaluate_checkpoint_a3v2(path, label):
             else None
         )
 
-    person_metrics = {
-        "person_AP_50_95": valid_mean(
-            person_precision
-        ),
-        "person_AP50": valid_mean(
-            person_precision[0]
-        ),
-        "person_AP75": valid_mean(
-            person_precision[5]
-        )
+    person = {
+        "person_AP_50_95": validmean(pi),
+        "person_AP50": validmean(pi[0]),
+        "person_AP75": validmean(pi[5])
     }
 
-    out = {
+    result = {
         "label": label,
         "checkpoint": path,
         "images": len(seen),
         "detections": len(detections),
+        "topk": 300,
         "metrics": metrics,
-        "person_metrics": person_metrics
+        "person_metrics": person
     }
 
-    del net31, ck, ce, dt
+    del net31, ck, dt, ce
 
     gc.collect()
 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    return out
+    return result
 
 
-# ============================================================
-# 4. SELECT CHECKPOINTS
-# ============================================================
+# ------------------------------------------------------------
+# 3 CHECKPOINTS, SAME EVALUATION
+# ------------------------------------------------------------
 
 paths31 = {
-    "A3_176K_reference": A3_CKPT
+    "A3_176K_reference": A3_CKPT,
+    "A3_v2_old_208K": OLD_V2_BEST,
+    "A3_v2_peakgeom_candidate": NEW_V2_BEST
 }
-
-if (
-    os.path.abspath(SELECTED_A3_V2)
-    != os.path.abspath(A3_CKPT)
-):
-    paths31["A3_v2_selected"] = (
-        SELECTED_A3_V2
-    )
-
-
-# ============================================================
-# 5. RUN OFFICIAL EVALUATION
-# ============================================================
 
 results31 = {}
 
 for label, path in paths31.items():
 
-    print("\nCOCOeval:", label)
-    print("Checkpoint:", path)
+    print("\nEvaluating:", label)
 
-    results31[label] = (
-        evaluate_checkpoint_a3v2(
-            path,
-            label
-        )
-    )
-
-    current_map = (
-        results31[label]
-        ["metrics"]["mAP_50_95"]
+    results31[label] = eval31_peakgeom(
+        path,
+        label
     )
 
     print(
-        "mAP50:95 =",
-        round(100 * current_map, 4),
-        "%"
-    )
-
-
-# ============================================================
-# 6. COMPARE A3-v2 MINUS A3
-# ============================================================
-
-if "A3_v2_selected" in results31:
-
-    old = results31[
-        "A3_176K_reference"
-    ]
-
-    new = results31[
-        "A3_v2_selected"
-    ]
-
-    print(
-        "\nDELTA A3-v2 minus A3 "
-        "(percentage points)"
-    )
-
-    for k in old["metrics"]:
-
-        delta = 100 * (
-            new["metrics"][k]
-            - old["metrics"][k]
-        )
-
-        print(
-            f"{k:16s} {delta:+.4f} pp"
-        )
-
-    for k in old["person_metrics"]:
-
-        x = old["person_metrics"][k]
-        y = new["person_metrics"][k]
-
-        if x is not None and y is not None:
-
-            print(
-                f"{k:16s} {100*(y-x):+.4f} pp"
-            )
-
-else:
-
-    print(
-        "No A3-v2 checkpoint beat A3 reference."
+        "COCO mAP50:95:",
+        f"{100 * results31[label]['metrics']['mAP_50_95']:.4f}%"
     )
 
     print(
-        "Original A3 176K retained."
+        "Person AP:",
+        f"{100 * results31[label]['person_metrics']['person_AP_50_95']:.4f}%"
     )
 
 
-# ============================================================
-# 7. SAVE JSON
-# ============================================================
+# ------------------------------------------------------------
+# SELECT WINNER BASED ON OFFICIAL mAP
+# ------------------------------------------------------------
 
-out_path31 = os.path.join(
-    V2_ROOT,
-    "A3_v2_official_COCOeval.json"
+old = results31["A3_v2_old_208K"]
+new = results31["A3_v2_peakgeom_candidate"]
+
+selected_name = (
+    "A3_v2_peakgeom_candidate"
+    if new["metrics"]["mAP_50_95"]
+       > old["metrics"]["mAP_50_95"]
+    else "A3_v2_old_208K"
+)
+
+selected = results31[selected_name]
+
+# Keep existing QC variable contract.
+results31["A3_v2_selected"] = selected
+
+SELECTED_A3_V2 = selected["checkpoint"]
+
+# QC reports are stored in new experiment folder.
+V2_ROOT = NEW_V2_ROOT
+
+# History follows whichever checkpoint was selected.
+V2_HISTORY = (
+    NEW_V2_HISTORY
+    if selected_name == "A3_v2_peakgeom_candidate"
+    else OLD_V2_HISTORY
+)
+
+V2_BEST = SELECTED_A3_V2
+
+ref = results31["A3_176K_reference"]
+
+print("=" * 65)
+
+print("WINNER:", selected_name)
+print("Selected:", SELECTED_A3_V2)
+
+print(
+    "Delta NEW minus OLD (mAP pp):",
+    100 * (
+        new["metrics"]["mAP_50_95"]
+        - old["metrics"]["mAP_50_95"]
+    )
+)
+
+print(
+    "Delta NEW minus OLD (person AP pp):",
+    100 * (
+        new["person_metrics"]["person_AP_50_95"]
+        - old["person_metrics"]["person_AP_50_95"]
+    )
+)
+
+print(
+    "Selected minus A3 176K (mAP pp):",
+    100 * (
+        selected["metrics"]["mAP_50_95"]
+        - ref["metrics"]["mAP_50_95"]
+    )
+)
+
+output31 = os.path.join(
+    NEW_V2_ROOT,
+    "peakgeom_official_COCOeval_3arms.json"
 )
 
 with open(
-    out_path31,
-    "w",
-    encoding="utf-8"
+    output31,
+    "w"
 ) as f:
-
     json.dump(
         results31,
         f,
@@ -441,5 +443,5 @@ with open(
         allow_nan=False
     )
 
-print("Saved:", out_path31)
-print("STEP 31 PASS — official COCOeval complete")
+print("Saved:", output31)
+print("STEP 31 PASS — official COCOeval K300")
