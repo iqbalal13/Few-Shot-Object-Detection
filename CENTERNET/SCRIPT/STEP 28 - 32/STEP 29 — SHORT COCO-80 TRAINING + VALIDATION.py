@@ -272,9 +272,9 @@ def evaluate_centernet(
             }
 
             predictions = decode_centernet(
-                decode_outputs,
-                K=100,
-                score_threshold=0.0
+    decode_outputs,
+    K=CONFIG["eval_topk"],
+    score_threshold=0.0
             )
 
             # Standard COCO detections in original COCO coordinates.
