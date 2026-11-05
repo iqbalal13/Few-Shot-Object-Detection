@@ -1,217 +1,361 @@
-# STEP 11C — CCTV YOLO TO COCO
-# Compatible with TRAIN/IMAGE/LABEL,
-# VALIDATION/IMAGE/LABEL, TESTING/IMAGE/LABEL
 
-from google.colab import drive
+# ==============================================================
+# STEP 11C — CCTV YOLO TXT TO COCO JSON
+# SAME-VIDEO PROTOCOL
+# ==============================================================
+# Recording ID sama: WARNING
+# Nama frame identik: BLOCK
+# File gambar identik lintas split: BLOCK
+# Gambar/TXT tidak cocok: BLOCK
+# Dataset Google Drive asli: TIDAK DIUBAH
+# ==============================================================
+
 from pathlib import Path
 from PIL import Image, ImageDraw
 from IPython.display import display
+from collections import defaultdict
+
+import hashlib
 import json
 import math
 import re
 import shutil
 
-drive.mount("/content/drive")
+SOURCE = Path(
+    '/content/drive/MyDrive/DATASET/GAMBAR CCTV'
+)
 
-SOURCE = Path("/content/drive/MyDrive/DATASET/GAMBAR CCTV")
 TARGET = CCTV_ROOT
 
-print("CCTV SOURCE:", SOURCE)
-assert SOURCE.is_dir(), f"Folder CCTV tidak ditemukan: {SOURCE}"
-
-SPLITS = {
-    "train": ("TRAIN", "IMAGE", "LABEL"),
-    "val": ("VALIDATION", "IMAGE", "LABEL"),
-    "test": ("TESTING", "IMAGE", "LABEL")
+SPLIT_DIRS = {
+    'train': 'TRAIN',
+    'val': 'VALIDATION',
+    'test': 'TESTING'
 }
 
-IMAGE_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+IMAGE_EXT = {
+    '.jpg', '.jpeg', '.png', '.bmp', '.webp'
+}
 
-def find_folder(parent, name):
-    matches = [
+SAME_VIDEO_PROTOCOL = True
+REQUIRE_ALL_PAIRS = True
+
+# ==============================================================
+# A. VALIDASI PATH
+# ==============================================================
+
+if not SOURCE.is_dir():
+    from google.colab import drive
+    drive.mount('/content/drive')
+
+if not SOURCE.is_dir():
+    raise FileNotFoundError(
+        f'Dataset CCTV tidak ditemukan: {SOURCE}'
+    )
+
+if not isinstance(TARGET, Path):
+    TARGET = Path(TARGET)
+
+if TARGET.resolve() != Path(
+    '/content/datasets/cctv'
+).resolve():
+    raise RuntimeError(
+        f'CCTV_ROOT tidak sesuai konfigurasi: {TARGET}'
+    )
+
+
+def find_subdir(parent, name):
+    found = [
         p for p in parent.iterdir()
-        if p.is_dir() and p.name.casefold() == name.casefold()
+        if p.is_dir()
+        and p.name.casefold() == name.casefold()
     ]
-    if len(matches) != 1:
+
+    if len(found) != 1:
         raise FileNotFoundError(
-            f"Folder {name} tidak ditemukan di {parent}. "
-            f"Folder tersedia: "
-            f"{[p.name for p in parent.iterdir() if p.is_dir()]}"
+            f'Folder {name} tidak ada/ambigu di {parent}'
         )
-    return matches[0]
+
+    return found[0]
+
 
 def file_key(path):
-    # frame_120 (1).jpg dan frame_120.txt -> frame_120
-    stem = Path(path).stem
     return re.sub(
-        r"(?:\s*\(\d+\))+$", "", stem
+        r'(?:\s*\(\d+\))+$',
+        '',
+        Path(path).stem
     ).strip().casefold()
 
-def index_files(files, split, kind):
+
+def make_index(files, split, kind):
     result = {}
+
     for p in files:
         key = file_key(p)
+
         if key in result:
             raise ValueError(
-                f"{split}: duplikat {kind}: "
-                f"{result[key].name} dan {p.name}"
+                f'{split}: duplikat {kind}: '
+                f'{result[key].name} dan {p.name}'
             )
+
         result[key] = p
+
     return result
 
-def recording_key(name):
-    match = re.fullmatch(r"(.+)_frame_\d+", name)
-    return match.group(1) if match else None
 
-assert SOURCE.is_dir(), f"Folder CCTV tidak ada: {SOURCE}"
+def recording_key(key):
+    m = re.fullmatch(
+        r'(.+)_frame_(\d+)',
+        key
+    )
 
-# A. Cari pasangan gambar-label
+    return m.group(1) if m else None
+
+
+# ==============================================================
+# B. BACA PASANGAN GAMBAR DAN LABEL
+# ==============================================================
+
 pairs = {}
 keys = {}
+failures = []
 
-for split, names in SPLITS.items():
-    split_dir = find_folder(SOURCE, names[0])
-    img_dir = find_folder(split_dir, names[1])
-    lbl_dir = find_folder(split_dir, names[2])
+for split, name in SPLIT_DIRS.items():
+    split_dir = find_subdir(SOURCE, name)
 
-    images = index_files(
-        [p for p in img_dir.iterdir()
-         if p.is_file() and p.suffix.casefold() in IMAGE_EXT],
-        split, "gambar"
+    imdir = find_subdir(split_dir, 'IMAGE')
+    lbdir = find_subdir(split_dir, 'LABEL')
+
+    images = make_index(
+        [
+            p for p in imdir.iterdir()
+            if p.is_file()
+            and p.suffix.casefold() in IMAGE_EXT
+        ],
+        split,
+        'gambar'
     )
 
-    labels = index_files(
-        [p for p in lbl_dir.iterdir()
-         if p.is_file() and p.suffix.casefold() == ".txt"],
-        split, "label"
+    labels = make_index(
+        [
+            p for p in lbdir.iterdir()
+            if p.is_file()
+            and p.suffix.casefold() == '.txt'
+        ],
+        split,
+        'label'
     )
 
-    matched = sorted(set(images) & set(labels))
-    missing = sorted(set(images) - set(labels))
-    extra = sorted(set(labels) - set(images))
+    matched = sorted(
+        images.keys() & labels.keys()
+    )
+
+    missing = sorted(
+        images.keys() - labels.keys()
+    )
+
+    orphan = sorted(
+        labels.keys() - images.keys()
+    )
 
     print(
-        f"{split.upper()}: "
-        f"{len(images)} images, "
-        f"{len(labels)} labels, "
-        f"{len(matched)} matched"
-    )
-    print(
-        f"  Gambar tanpa label: {len(missing)}; "
-        f"label tanpa gambar: {len(extra)}"
+        f'{split.upper()}: '
+        f'{len(images)} images, '
+        f'{len(labels)} TXT, '
+        f'{len(matched)} matched; '
+        f'{len(missing)} images tanpa TXT, '
+        f'{len(orphan)} TXT tanpa image'
     )
 
     if missing:
-        print("  Dilewati:", [images[k].name for k in missing[:5]])
-    if extra:
-        print("  Label tanpa gambar:", [labels[k].name for k in extra[:5]])
+        print(
+            'Gambar tanpa TXT:',
+            [images[k].name for k in missing[:20]]
+        )
+
+    if orphan:
+        print(
+            'TXT tanpa gambar:',
+            [labels[k].name for k in orphan[:20]]
+        )
+
+    if REQUIRE_ALL_PAIRS and (missing or orphan):
+        failures.append(split)
 
     if not matched:
-        raise ValueError(
-            f"{split}: Tidak ada gambar dan TXT yang berpasangan. "
-            "Pastikan LABEL berisi file .txt asli."
-        )
+        failures.append(split)
 
     pairs[split] = [
-        (images[k], labels[k]) for k in matched
+        (images[k], labels[k])
+        for k in matched
     ]
+
     keys[split] = set(matched)
 
-# B. Cek kemungkinan kebocoran split
-for a, b in [
-    ("train", "val"),
-    ("train", "test"),
-    ("val", "test")
-]:
-    overlap = keys[a] & keys[b]
-    if overlap:
-        raise ValueError(
-            f"DATA LEAKAGE {a}/{b}: "
-            f"frame sama {sorted(overlap)[:5]}"
-        )
+if failures:
+    raise ValueError(
+        'GAGAL PAIRING pada split: '
+        + ', '.join(sorted(set(failures)))
+        + '. Perbaiki gambar/TXT sesuai CSV Step 11A. '
+        'Jangan mengganti nama TXT yang tidak sesuai gambar.'
+    )
 
-    rec_a = {
-        recording_key(k) for k in keys[a]
-    } - {None}
-    rec_b = {
-        recording_key(k) for k in keys[b]
-    } - {None}
 
-    same_recordings = rec_a & rec_b
-    if same_recordings:
-        raise ValueError(
-            f"POTENSI DATA LEAKAGE {a}/{b}: "
-            f"rekaman sama {sorted(same_recordings)[:5]}. "
-            "Pisahkan berdasarkan rekaman."
-        )
+# ==============================================================
+# C. VALIDASI DUPLIKAT GAMBAR ANTAR-SPLIT
+# ==============================================================
 
-print("SPLIT CHECK PASSED")
-
-# C. Konversi YOLO ke COCO
-datasets = {}
+image_digests = defaultdict(list)
 
 for split, items in pairs.items():
-    data = {
-        "info": {"description": "CCTV person detection"},
-        "licenses": [],
-        "categories": [{
-            "id": 1,
-            "name": "person",
-            "supercategory": "person"
+    for image_path, _ in items:
+        digest = hashlib.sha256(
+            image_path.read_bytes()
+        ).hexdigest()
+
+        image_digests[digest].append(
+            (split, image_path.name)
+        )
+
+for digest, items in image_digests.items():
+    if len({s for s, _ in items}) > 1:
+        raise ValueError(
+            'Gambar dengan isi file IDENTIK '
+            'di beberapa split: '
+            + str(items)
+        )
+
+for a, b in [
+    ('train', 'val'),
+    ('train', 'test'),
+    ('val', 'test')
+]:
+    overlap = keys[a] & keys[b]
+
+    if overlap:
+        raise ValueError(
+            f'FRAME SAMA {a}/{b}: '
+            f'{sorted(overlap)[:10]}'
+        )
+
+    ra = {
+        recording_key(k)
+        for k in keys[a]
+    } - {None}
+
+    rb = {
+        recording_key(k)
+        for k in keys[b]
+    } - {None}
+
+    same_recordings = sorted(ra & rb)
+
+    if same_recordings:
+        if SAME_VIDEO_PROTOCOL:
+            print(
+                f'WARNING {a}/{b}: '
+                f'{len(same_recordings)} recording ID sama; '
+                f'contoh={same_recordings[:10]}'
+            )
+            print(
+                'Ini evaluasi SAME-VIDEO, '
+                'BUKAN generalisasi cross-video.'
+            )
+        else:
+            raise ValueError(
+                f'Recording overlap {a}/{b}: '
+                f'{same_recordings[:10]}'
+            )
+
+
+# ==============================================================
+# D. KONVERSI YOLO TO COCO
+# ==============================================================
+
+coco_data = {}
+
+for split, items in pairs.items():
+    dataset = {
+        'info': {
+            'description':
+                'CCTV person detection — same-video protocol'
+        },
+        'licenses': [],
+        'categories': [{
+            'id': 1,
+            'name': 'person',
+            'supercategory': 'person'
         }],
-        "images": [],
-        "annotations": []
+        'images': [],
+        'annotations': []
     }
 
     positive = 0
 
-    for image_id, (img_path, lbl_path) in enumerate(items, 1):
-        with Image.open(img_path) as img:
-            W, H = img.size
+    for image_id, (img_path, lbl_path) in enumerate(
+        items,
+        start=1
+    ):
+        with Image.open(img_path) as im:
+            width, height = im.size
 
-        data["images"].append({
-            "id": image_id,
-            "file_name": img_path.name,
-            "width": W,
-            "height": H
+            if width <= 0 or height <= 0:
+                raise ValueError(
+                    f'Ukuran gambar tidak valid: {img_path.name}'
+                )
+
+        dataset['images'].append({
+            'id': image_id,
+            'file_name': img_path.name,
+            'width': width,
+            'height': height
         })
 
         box_count = 0
 
         lines = lbl_path.read_text(
-            encoding="utf-8-sig"
+            encoding='utf-8-sig'
         ).splitlines()
 
         for line_no, line in enumerate(lines, 1):
             if not line.strip():
                 continue
 
-            values = line.split()
-            if len(values) != 5:
+            tokens = line.split()
+
+            if len(tokens) != 5:
                 raise ValueError(
-                    f"{lbl_path.name}:{line_no}: "
-                    "label harus berisi 5 angka YOLO"
+                    f'{lbl_path.name}:{line_no}: '
+                    'butuh 5 nilai YOLO'
                 )
 
             try:
-                cls, cx, cy, bw, bh = map(float, values)
+                cls, cx, cy, bw, bh = map(
+                    float,
+                    tokens
+                )
             except ValueError as exc:
                 raise ValueError(
-                    f"{lbl_path.name}:{line_no}: "
-                    "ada nilai bukan angka"
+                    f'{lbl_path.name}:{line_no}: '
+                    'nilai bukan angka'
                 ) from exc
 
-            if not all(map(
-                math.isfinite, (cls, cx, cy, bw, bh)
-            )):
+            if not all(
+                map(
+                    math.isfinite,
+                    (cls, cx, cy, bw, bh)
+                )
+            ):
                 raise ValueError(
-                    f"{lbl_path.name}:{line_no}: NaN/Inf"
+                    f'{lbl_path.name}:{line_no}: '
+                    'nilai NaN/Inf'
                 )
 
             if cls != 0:
                 raise ValueError(
-                    f"{lbl_path.name}:{line_no}: "
-                    f"class {cls}, diharapkan person=0"
+                    f'{lbl_path.name}:{line_no}: '
+                    f'class={cls}, harus person=0'
                 )
 
             x1 = cx - bw / 2
@@ -220,110 +364,181 @@ for split, items in pairs.items():
             y2 = cy + bh / 2
 
             if not (
-                0 <= cx <= 1 and 0 <= cy <= 1 and
-                0 < bw <= 1 and 0 < bh <= 1 and
-                x1 >= -1e-5 and y1 >= -1e-5 and
-                x2 <= 1 + 1e-5 and y2 <= 1 + 1e-5
+                0 <= cx <= 1
+                and 0 <= cy <= 1
+                and 0 < bw <= 1
+                and 0 < bh <= 1
+                and x1 >= -1e-5
+                and y1 >= -1e-5
+                and x2 <= 1 + 1e-5
+                and y2 <= 1 + 1e-5
             ):
                 raise ValueError(
-                    f"{lbl_path.name}:{line_no}: "
-                    "bbox YOLO tidak valid"
+                    f'{lbl_path.name}:{line_no}: '
+                    'bbox YOLO tidak valid'
                 )
 
-            x1 = max(0, x1) * W
-            y1 = max(0, y1) * H
-            x2 = min(1, x2) * W
-            y2 = min(1, y2) * H
+            x1 = max(0, x1) * width
+            y1 = max(0, y1) * height
+            x2 = min(1, x2) * width
+            y2 = min(1, y2) * height
 
-            w, h = x2 - x1, y2 - y1
+            w = x2 - x1
+            h = y2 - y1
 
-            if min(w, h) <= 0:
-                raise ValueError("BBox memiliki area nol")
+            if w <= 0 or h <= 0:
+                raise ValueError(
+                    f'{lbl_path.name}:{line_no}: '
+                    'bbox area nol'
+                )
 
-            data["annotations"].append({
-                "id": len(data["annotations"]) + 1,
-                "image_id": image_id,
-                "category_id": 1,
-                "bbox": [x1, y1, w, h],
-                "area": w * h,
-                "iscrowd": 0,
-                "segmentation": []
+            dataset['annotations'].append({
+                'id': len(dataset['annotations']) + 1,
+                'image_id': image_id,
+                'category_id': 1,
+                'bbox': [x1, y1, w, h],
+                'area': w * h,
+                'iscrowd': 0,
+                'segmentation': []
             })
+
             box_count += 1
 
         if box_count:
             positive += 1
 
-    if split == "train" and positive < 5:
+    if split == 'train' and positive < 5:
         raise ValueError(
-            f"Train membutuhkan minimal 5 gambar "
-            f"beranotasi person. Tersedia {positive}."
+            f'TRAIN butuh minimal 5 gambar positif, '
+            f'hanya {positive}'
         )
 
-    if split != "train" and not data["annotations"]:
+    if (
+        split != 'train'
+        and not dataset['annotations']
+    ):
         raise ValueError(
-            f"{split}: tidak ada anotasi person untuk evaluasi"
+            f'{split.upper()}: '
+            'tidak ada anotasi person untuk evaluasi'
         )
 
-    datasets[split] = data
+    coco_data[split] = dataset
 
     print(
-        f"COCO {split}: "
-        f"{len(data['images'])} gambar, "
-        f"{positive} gambar positif, "
-        f"{len(data['annotations'])} bbox"
+        f'COCO {split.upper()}: '
+        f'{len(dataset["images"])} gambar, '
+        f'{positive} gambar positif, '
+        f'{len(dataset["annotations"])} bbox'
     )
 
-# D. Simpan dataset lokal
-ann_dir = TARGET / "annotations"
-ann_dir.mkdir(parents=True, exist_ok=True)
 
-for split, items in pairs.items():
-    image_out = TARGET / split / "images"
-    image_out.mkdir(parents=True, exist_ok=True)
+# ==============================================================
+# E. SIMPAN KE DATASET LOKAL COLAB
+# ==============================================================
 
-    for src, _ in items:
-        dst = image_out / src.name
-        if (
-            not dst.is_file()
-            or dst.stat().st_size != src.stat().st_size
-        ):
-            shutil.copy2(src, dst)
+# Gunakan staging supaya file lama tidak ditimpa
+# sebelum seluruh validasi dan copy selesai.
 
-    json_path = ann_dir / f"{split}.json"
-    temp = ann_dir / f"{split}.json.tmp"
-
-    temp.write_text(
-        json.dumps(datasets[split], ensure_ascii=False),
-        encoding="utf-8"
-    )
-    temp.replace(json_path)
-
-    print("SAVED:", json_path)
-
-# E. Preview satu gambar TRAIN beserta bbox
-example = datasets["train"]["images"][0]
-preview_path = (
-    TARGET / "train" / "images" / example["file_name"]
+staging = TARGET.with_name(
+    TARGET.name + '_staging'
 )
 
-with Image.open(preview_path) as img:
-    preview = img.convert("RGB")
+backup = TARGET.with_name(
+    TARGET.name + '_previous'
+)
+
+if staging.exists():
+    shutil.rmtree(staging)
+
+if backup.exists():
+    raise RuntimeError(
+        f'Folder backup run lama masih ada: {backup}. '
+        'Periksa manual sebelum mengulangi.'
+    )
+
+try:
+    (staging / 'annotations').mkdir(
+        parents=True
+    )
+
+    for split, items in pairs.items():
+        out_img = staging / split / 'images'
+
+        out_img.mkdir(parents=True)
+
+        for image_path, _ in items:
+            shutil.copy2(
+                image_path,
+                out_img / image_path.name
+            )
+
+        json_path = (
+            staging / 'annotations' / f'{split}.json'
+        )
+
+        json_path.write_text(
+            json.dumps(
+                coco_data[split],
+                ensure_ascii=False
+            ),
+            encoding='utf-8'
+        )
+
+    if TARGET.exists():
+        TARGET.rename(backup)
+
+    try:
+        staging.rename(TARGET)
+    except Exception:
+        if backup.exists() and not TARGET.exists():
+            backup.rename(TARGET)
+        raise
+
+    if backup.exists():
+        shutil.rmtree(backup)
+
+except Exception:
+    if staging.exists():
+        shutil.rmtree(staging)
+    raise
+
+
+# ==============================================================
+# F. PREVIEW BOUNDING BOX TRAIN
+# ==============================================================
+
+example = coco_data['train']['images'][0]
+
+preview_path = (
+    TARGET
+    / 'train'
+    / 'images'
+    / example['file_name']
+)
+
+with Image.open(preview_path) as im:
+    preview = im.convert('RGB')
 
 draw = ImageDraw.Draw(preview)
 
-for ann in datasets["train"]["annotations"]:
-    if ann["image_id"] == example["id"]:
-        x, y, w, h = ann["bbox"]
+for ann in coco_data['train']['annotations']:
+    if ann['image_id'] == example['id']:
+        x, y, w, h = ann['bbox']
+
         draw.rectangle(
-            [x, y, x + w, y + h],
-            outline="red", width=4
+            (x, y, x + w, y + h),
+            outline='red',
+            width=4
         )
 
 preview.thumbnail((800, 800))
 display(preview)
 
-print("=" * 50)
-print("SUCCESS: CCTV DATASET READY FOR STEP 15")
-print("Stage 1 COCO training: OFF")
-print("Stage 2 CCTV training: OFF")
+print('SUCCESS: CCTV DATASET READY FOR STEP 15')
+print('COCO Stage 1 training: OFF')
+print('Stage 2 CCTV training: OFF')
+
+print(
+    'Keterbatasan: evaluasi SAME-VIDEO; '
+    'review temporal/near-duplicate tetap diperlukan.'
+)
