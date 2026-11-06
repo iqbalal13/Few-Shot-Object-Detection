@@ -1,11 +1,12 @@
 
-# STEP 11 — CONFIGURATION (CCTV PATH FIX)
+# STEP 11 — CONFIGURATION (STAGE 2 SMOKE TEST)
 
 from pathlib import Path
 
 ROOT = Path("/content/Meta-DETR")
 COCO_ROOT = Path("/content/datasets/coco")
 CCTV_ROOT = Path("/content/datasets/cctv")
+
 WORKSPACE = Path("/content/metadetr_work")
 WORKSPACE.mkdir(parents=True, exist_ok=True)
 
@@ -27,9 +28,17 @@ CHECKPOINT_PATH = (
     ROOT / "checkpoints/meta_detr_coco_base_checkpoint.pth"
 )
 
+# =====================================================
+# GENERAL CONFIGURATION
+# =====================================================
+
 SEED = 42
 SHARED_SOURCE_MANIFEST = None
 BACKUP_TO_DRIVE = False
+
+# =====================================================
+# STAGE 1 — COCO-80 (SUDAH SELESAI)
+# =====================================================
 
 STAGE1_EPOCHS = 1
 STAGE1_TIME_BUDGET_SECONDS = 3600
@@ -42,19 +51,43 @@ RUN_STAGE1_TRAIN = False
 
 SOURCE_CHECKPOINT_APPROVED = True
 
+# =====================================================
+# STAGE 2 — CCTV FEW-SHOT
+# =====================================================
+
 STAGE2_SHOTS = (1, 3, 5)
 STAGE2_EPOCHS = 10
 STAGE2_LR = 2e-5
 STAGE2_PATIENCE = 4
 
 RUN_PREPARE_CCTV = True
-RUN_STAGE2_SMOKE = False
+
+# PERUBAHAN: AKTIFKAN GPU SMOKE TEST
+RUN_STAGE2_SMOKE = True
+
+# Training dan evaluasi final masih OFF
 RUN_STAGE2_TRAIN = False
 RUN_CCTV_VAL_EVAL = False
 RUN_CCTV_TEST = False
 
+# =====================================================
+# STATUS CONFIGURATION
+# =====================================================
+
+print("=" * 55)
 print("CONFIG READY")
+print("=" * 55)
+
+print("ROOT:", ROOT)
 print("CCTV DRIVE:", CCTV_DRIVE_ROOT)
 print("CCTV OUTPUT:", CCTV_ROOT)
+print("STAGE1 CHECKPOINT:", STAGE1_CHECKPOINT)
+
 print("COCO TRAINING:", RUN_STAGE1_TRAIN)
-print("CCTV TRAINING:", RUN_STAGE2_TRAIN)
+print("CCTV PREPARATION:", RUN_PREPARE_CCTV)
+print("STAGE2 SMOKE TEST:", RUN_STAGE2_SMOKE)
+print("STAGE2 TRAINING:", RUN_STAGE2_TRAIN)
+print("CCTV TEST EVALUATION:", RUN_CCTV_TEST)
+
+print("SHOTS:", STAGE2_SHOTS)
+print("=" * 55)
