@@ -1,63 +1,65 @@
 
-# STEP 17 — CCTV FINE-TUNING + AUTO BACKUP DRIVE
-# Tidak mengulang Stage 1 COCO-80.
+# STEP 17 — CCTV 1/3/5-SHOT TRAINING + DRIVE BACKUP
+# Tidak menjalankan Stage 1 COCO lagi.
 
 from pathlib import Path
-from google.colab import drive
-import shutil
 import json
-
+import shutil
+from google.colab import drive
 from metadetr_pipeline.stage2 import run_finetune
 
-# Pastikan Drive terhubung
-drive.mount("/content/drive")
-
-BACKUP_ROOT = Path(
-    "/content/drive/MyDrive/MetaDETR_Thesis/Stage2_CCTV"
-)
-BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
-
-# Pemeriksaan sebelum training
-assert G3_READY, "Stage 1 belum disetujui"
-assert STAGE1_CHECKPOINT.is_file(), "Checkpoint COCO-80 hilang"
+# Preflight: pastikan hasil step sebelumnya tersedia.
+assert G3_READY, "Checkpoint Stage 1 belum approved"
+assert STAGE1_CHECKPOINT.is_file(), "Checkpoint Stage 1 hilang"
 
 for shot in (1, 3, 5):
     smoke_path = (
         WORKSPACE / "gates" /
         f"g4_stage2_{shot}shot_smoke.json"
     )
+    assert smoke_path.is_file(), f"Smoke {shot}-shot belum ada"
+    report = json.loads(smoke_path.read_text())
+    assert report.get("smoke_pass") is True, f"Smoke {shot}-shot gagal"
 
-    assert smoke_path.is_file(), (
-        f"Smoke test {shot}-shot belum ada"
+    subset = (
+        WORKSPACE / "cctv" / "fewshot" /
+        f"cctv_train_{shot}shot.json"
     )
+    assert subset.is_file(), f"Subset {shot}-shot tidak ditemukan"
 
-    smoke = json.loads(smoke_path.read_text())
-    assert smoke.get("smoke_pass") is True, (
-        f"Smoke test {shot}-shot tidak PASS"
-    )
+assert (CCTV_ROOT / "annotations" / "val.json").is_file()
 
-print("PRECHECK PASS — Stage 2 siap dijalankan")
+drive.mount("/content/drive")
 
-# Tiga training independen dari checkpoint Stage 1
+BACKUP = Path(
+    "/content/drive/MyDrive/MetaDETR_Thesis/Stage2_CCTV"
+)
+BACKUP.mkdir(parents=True, exist_ok=True)
+
+# Simpan protokol dan manifest few-shot.
+shutil.copytree(
+    WORKSPACE / "cctv" / "fewshot",
+    BACKUP / "fewshot_manifests",
+    dirs_exist_ok=True
+)
+
+results = {}
+
 for shot in (1, 3, 5):
-
     output_dir = (
         WORKSPACE / "outputs" /
         f"stage2_cctv_{shot}shot"
     )
 
-    # Hindari menimpa model yang sudah selesai
     if (output_dir / "best.pth").exists():
         raise RuntimeError(
             f"{shot}-shot sudah memiliki best.pth. "
-            "Backup/periksa hasilnya sebelum mengulang."
+            "Periksa checkpoint sebelum menjalankan ulang."
         )
 
-    print(f"\n{'='*55}")
-    print(f"START TRAINING CCTV {shot}-SHOT")
-    print(f"{'='*55}")
+    print(f"\nSTART CCTV {shot}-SHOT")
 
-    best_path = Path(run_finetune(
+    best = Path(run_finetune(
         ROOT,
         WORKSPACE,
         CCTV_ROOT,
@@ -70,27 +72,28 @@ for shot in (1, 3, 5):
         patience=STAGE2_PATIENCE
     ))
 
-    assert best_path.is_file(), (
-        f"best.pth {shot}-shot tidak ditemukan"
-    )
+    assert best.is_file(), f"Model {shot}-shot gagal disimpan"
 
-    # Backup otomatis setiap shot
-    drive_folder = BACKUP_ROOT / f"{shot}shot"
-    drive_folder.mkdir(parents=True, exist_ok=True)
+    dest = BACKUP / f"{shot}shot"
+    dest.mkdir(parents=True, exist_ok=True)
 
-    for name in [
+    for name in (
         "best.pth",
         "latest.pth",
         "history.json",
         "transfer_report.json"
-    ]:
+    ):
         src = output_dir / name
+
         if src.is_file():
-            dst = drive_folder / name
+            dst = dest / name
             shutil.copy2(src, dst)
+
             assert dst.stat().st_size == src.stat().st_size
             print("BACKUP OK:", dst)
 
-    print(f"FINISHED {shot}-SHOT — BACKUP COMPLETE")
+    results[shot] = str(dest / "best.pth")
+    print(f"CCTV {shot}-SHOT COMPLETE")
 
-print("\nALL STAGE 2 TRAINING COMPLETED")
+print("\nTRAINING FINISHED")
+print(json.dumps(results, indent=2))
