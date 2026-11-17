@@ -1,0 +1,22 @@
+SA-PE-DA CenterNet — COCO-80 SINGLE EPOCH / CCTV (Google Colab A100)
+PROTOCOL ONE-EPOCH v1 — independent run; source Stage 1 stops at exactly 8,000 optimizer updates (batch size 1).
+Tujuan: perbandingan compute-budget matched dengan Meta-DETR v8.1 menggunakan 80 kelas COCO sebagai source/base, lalu supervised few-shot domain adaptation ke CCTV-person.
+
+Source Stage 1: 8.000 image ID COCO-Train persis seperti sampling Meta-DETR v8.1 (quota 100 gambar/kelas → union/deduplikasi → person top-up); seluruh anotasi 80 kelas; satu batas 3.600 detik total untuk optimasi 80 kelas bersama (bukan per kelas).
+Source evaluation: semua 5.000 COCO-Val, sekali setelah training source; di luar 3.600 detik.
+Target Stage 2: CCTV Drive TRAIN/IMAGE + LABEL, VALIDATION, TESTING; YOLO TXT class 0 untuk person; nested 1,3,5 gambar beranotasi; seed 42,43,44; adaptasi 128 parameter FiLM saja, 100 update/shot; validasi full 100 gambar setiap 20 update; checkpoint terbaik dipilih berdasarkan CCTV-Val AP50.
+Test: 200 CCTV-Test; mAP50, NCAcc50=TP/(TP+FP+FN), IoU≥0.50, confidence≥0.50; inference ms/image dari gambar CCTV nyata, input 1280×736, batch 1.
+Checkpoint baru: MyDrive/SA_PE_DA_CenterNet_LOCKED_COCO80/ (checkpoint SA-PE-DA one-class lama tidak digunakan dan tidak ditimpa).
+⚠️ Kesetaraan: 8.000 gambar & batas source 60 menit sama, tetapi arsitektur, checkpoint pretrained, jumlah update, dan exposure berbeda. Hasil Meta-DETR lama harus diharmonisasi support dan evaluatornya sebelum disebut strict apple-to-apple. Training CCTV adalah domain adaptation, bukan kelas semantik person yang unseen.
+
+Cara: Runtime → Change runtime type → GPU A100 → jalankan sel berurutan. Langkah 60 menit hanya berlaku saat Stage 1 COCO-80 dimulai; download dan evaluasi tidak termasuk. Jangan hapus runtime saat download; checkpoint bertahan di Drive.
+
+PENTING: Ini eksperimen tambahan 1 epoch, BUKAN lanjutan model COCO 10,74 epoch. Seluruh checkpoint source, target, dan metrik disimpan ke folder Drive terpisah. Jangan copy source80_final.pth lama ke folder eksperimen ini.
+
+Petunjuk STEP 0–10
+Untuk eksperimen baru 1 epoch: jalankan STEP 0, 1, 1A (opsional), 2, 3, 3A, 4, 5, 6, 7, 8, 9 secara berurutan. STEP 10 hanya untuk inference gambar sendiri. Semua source code model dan metrik CCTV tetap seperti notebook SA-PE-DA sebelumnya.
+
+STEP 4 berhenti pada 8.000 optimizer updates, batch size 1 dan 8.000 gambar unik. Ini menggantikan batas 60 menit; umumnya selesai jauh sebelum 60 menit menurut log lama, tetapi tidak dijamin.
+Checkpoint dan hasil 1 epoch disimpan di folder Drive baru, tidak menimpa hasil Stage 1 10,74 epoch maupun hasil CCTV lama.
+STEP 4 dapat diulang untuk resume jika terputus; cek output VERIFIED: 1 epoch... sebelum lanjut.
+Hasil 1 epoch belum diketahui sampai training, validation dan testing selesai di Colab.
