@@ -1,0 +1,11 @@
+Mode khusus untuk mengulang training domain adaptation CCTV saja.
+
+Stage 1 COCO-80 OFF: menggunakan checkpoint base/source tersimpan di Google Drive (source80_final.pth) yang sudah melalui 1 epoch / 8.000 COCO images / 8.000 optimizer updates.
+Stage 2 CCTV ON: melatih FiLM 128 parameter, 100 optimizer update, 1/3/5-shot × seeds 42/43/44; masing-masing dimulai ulang dari checkpoint source yang sama.
+Val: 100 gambar CCTV; model terbaik dipilih dari AP50 validation setiap 20 update.
+Test: 200 gambar CCTV; hasil mAP50, NCAcc50, dan inference time, serta tabel bersih tanpa ±.
+Checkpoint hasil CCTV ini disimpan di folder Drive terpisah dari eksperimen sebelumnya.
+Tidak ada unduh COCO-Train, tidak ada COCO source optimization, tidak ada evaluasi ulang 5.000 COCO-Val.
+Langsung jalankan Runtime → Run all setelah memilih GPU A100, memasang Google Drive, dan memastikan file checkpoint source serta dataset CCTV masih ada. Jika checkpoint source hilang, notebook berhenti; tidak otomatis melakukan training base.
+
+Catatan: 1/3/5-shot berarti 1/3/5 gambar CCTV beranotasi, bukan 1/3/5 orang. Dataset berada di satu lokasi CCTV, jadi hasil tidak otomatis berlaku untuk kamera lain.
