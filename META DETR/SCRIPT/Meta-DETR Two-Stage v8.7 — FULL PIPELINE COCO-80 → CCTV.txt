@@ -1,0 +1,12 @@
+SATU NOTEBOOK. Runtime → Run all, awal sampai akhir.
+Mode default full_pipeline: setup, download COCO serta checkpoint resmi bila diperlukan, training COCO80 dengan 8.000 gambar, 80 kelas termasuk person, batch 8, 1 epoch/1.000 langkah (freeze Stem+Layer1–3), COCO-Val, backup otomatis, audit dan konversi CCTV, tes 1/3/5-shot, training independen, CCTV-Val, CCTV-Test final, grafik dan tabel. Tidak perlu notebook terpisah atau mengubah flag setelah selesai Stage 1.
+
+Jika ingin memakai checkpoint Stage 1 yang sudah selesai agar tidak membuang waktu: ubah hanya RUN_MODE = 'stage2_cctv' pada sel di bawah. Tetap notebook yang sama, dan tetap berlanjut hingga CCTV-Test final. Mode ini memulihkan checkpoint hasil Stage 1 dari Drive serta melewati unduhan/latihan COCO.
+
+Run all: pilih GPU di Google Colab dan pastikan dataset CCTV asli berada di MyDrive/DATASET/GAMBAR CCTV; untuk mode reuse, backup Stage 1 harus berada di MyDrive/MetaDETR_Thesis/Stage1_COCO80_Freeze3_FullEpoch_BS8. Klik Runtime → Run all, lalu izinkan autentikasi Drive. Backup Stage 1 dan Stage 2 disimpan ke folder Drive yang sesuai.
+
+Kebijakan CCTV-Test: semua konfigurasi shot/LR/epoch telah ditentukan di awal; checkpoint terbaik dipilih hanya dari CCTV-Val, kemudian CCTV-Test dijalankan sekali pada akhir Run all. Jangan gunakan skor CCTV-Test untuk mengubah eksperimen yang sama. Tahap CCTV akan berhenti jika audit dataset/smoke test gagal.
+
+Mode stage1 alternatif: hanya COCO Stage 1, untuk pengujian sumber secara terpisah.
+
+Catatan ilmiah: satu epoch COCO tidak menjamin konvergensi. Penilaian utama FSOD adalah hasil CCTV-Val/Test, dan keterbatasan source fine-tuning perlu dicatat dalam tesis.
