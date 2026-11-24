@@ -1,0 +1,9 @@
+File resminya bernama checkpoint.pth, dari Google Drive peneliti Meta-DETR. Repository hanya menyimpan kode, bukan bobot besar ini.
+
+Cell berikut:
+
+Menggunakan checkpoint yang sudah ada bila valid.
+Mendeteksi /content/checkpoint.pth hasil upload manual atau file di MyDrive bila sudah di-mount.
+Jika belum ada, mencoba mengunduh dengan gdown dan menyimpan output error lengkap.
+Memeriksa ukuran dan header file untuk menolak file HTML/gagal-unduh (tidak menganggap berkas kecil sebagai checkpoint).
+Bila gdown ditolak karena kuota/izin Google Drive, lanjut ke 7B. Tidak perlu mengulang instalasi maupun kompilasi CUDA. Fix v4: gdown modern tidak mendukung --fuzzy. Notebook menggunakan file ID resmi langsung. Jika Google Drive membatasi unduhan, gunakan fallback bagian 7B, lalu ulangi bagian 8.
