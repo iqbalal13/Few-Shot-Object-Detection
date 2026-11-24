@@ -1,0 +1,5 @@
+PyTorch 2.6+ mengubah default torch.load menjadi weights_only=True; checkpoint resmi menyertakan metadata args. Patch lokal ini hanya membuat parameter pemuatan eksplisit weights_only=False. Hanya lakukan pada checkpoint tepercaya milik peneliti. Sel ini idempoten. Source asli GitHub tetap dapat dilihat melalui riwayat git.
+
+Untuk menghindari unduhan tambahan backbone ImageNet saat memuat full checkpoint COCO, set pretrained=False pada constructor backbone. Parameter backbone kemudian ditimpa penuh oleh checkpoint resmi. Ini adalah perubahan mekanisme inisialisasi, bukan perubahan arsitektur. Jika hendak base-train dari nol, kembalikan perubahan tersebut.
+
+Perbaikan tambahan v2: util/misc.py memiliki bug parsing versi TorchVision (float(version[:3])). Pada TorchVision 0.26.0, kode lama masuk ke cabang khusus versi <0.5 dan gagal mengimpor _NewEmptyTensorOp. Cell berikut memperbaiki pengecekan versi memakai pasangan (major, minor); tidak mengubah arsitektur.
