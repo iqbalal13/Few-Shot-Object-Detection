@@ -1,0 +1,3 @@
+Cell berikut memeriksa bahwa checkpoint memiliki model dan membandingkan konfigurasi penting (backbone, encoder/decoder, queries) bila metadata tersedia. Kemudian memanggil build_model() dari kode resmi Meta-DETR dan load_state_dict.
+
+Keamanan: torch.load(weights_only=False) diperlukan untuk kompatibilitas metadata checkpoint lama, tetapi hanya jalankan pada checkpoint resmi/tepercaya. Validasi ukuran/header di 7A bukan jaminan keaslian file. Tidak ada forward pass deteksi lengkap atau pengukuran mAP dalam langkah ini.
