@@ -1,0 +1,1 @@
+These tests validate sampling, CCTV nested shot protocol, 5→1 positional checkpoint transfer and NCAcc matching on synthetic inputs. They do not validate CUDA forward/backward, COCO training, or numerical correctness of final mAP on real data.
