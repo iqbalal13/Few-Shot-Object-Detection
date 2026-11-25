@@ -1,0 +1,1 @@
+Cell ini meminta izin akses Drive di awal (atau memakai mount yang sudah aktif), lalu memeriksa folder backup bisa ditulis. Jika autentikasi gagal, training belum dimulai, sehingga tidak membuang waktu GPU.
