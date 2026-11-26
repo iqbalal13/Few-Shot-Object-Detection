@@ -1,0 +1,1 @@
+Setelah pelatihan selesai dan COCO-Val menghasilkan hasil resmi, cell ini secara otomatis mengamankan checkpoint, log, status, manifest, audit freeze, dan detail evaluasi. Berkas tidak akan menimpa backup lain yang isinya berbeda. Snapshot darurat partial_latest.pth tidak diduplikasi jika checkpoint final sudah lengkap, supaya penyimpanan Drive lebih hemat.
