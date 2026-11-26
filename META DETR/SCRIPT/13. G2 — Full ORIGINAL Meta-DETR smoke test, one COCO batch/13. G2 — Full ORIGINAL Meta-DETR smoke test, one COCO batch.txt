@@ -1,0 +1,5 @@
+This is different from the earlier CUDA operator-only smoke test: it runs the full official Meta-DETR + original loss + backward + optimizer on COCO. The source checkpoint used here is the official 60-base initializer. Must complete before enabling G3.
+
+v7.1 fix: Official loader expects data/coco relative to the cloned repository; G2 now temporarily changes its working directory while loading the batch, then restores it. No architecture or dataset sampling changes.
+
+Gate tambahan freeze: ResNet-101 Layer 1, 2, dan 3 harus memiliki trainable_params = 0, sedangkan Layer 4 harus trainable. Jika audit gagal, Step 14 tidak boleh dijalankan.
