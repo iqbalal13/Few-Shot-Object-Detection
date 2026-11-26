@@ -1,0 +1,1 @@
+Plots use only logged optimizer-step losses and actual COCO-Val bounding-box AP. No synthetic data, no assumed convergence. Full COCO-Val may take substantial extra time beyond the Stage 1 full-epoch training time. The checkpoint is not approved for CCTV unless real AP is inspected and the manual gate is explicitly enabled.
