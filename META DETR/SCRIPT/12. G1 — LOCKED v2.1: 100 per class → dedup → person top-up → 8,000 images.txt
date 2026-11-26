@@ -1,1 +1,0 @@
-All 80 COCO classes are source/base (including person). Random seed 42, no replacement. Keep all bounding boxes in chosen COCO train2017 images, not person-only. Never sample COCO-Val. The manifest can be reused for CenterNet (person labels only).
